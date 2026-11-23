@@ -3569,3 +3569,67 @@ near the flat 15.1 (basis-only risk). Any other result is a tail-model problem.
 - **Depth-regeneration from the tape:** when regenerating below the top-20,
   seed sizes from the measured depth profile *and* the recent trade rate, so
   quiet markets keep thin tails and active ones keep realistic walls.
+
+### The 78/85 σ advisory is the real venue's own pre-launch state (2026-11-23)
+
+The advisory names 7 `para:*` instruments without a σ fit
+(H100/NAVER/TENCENT/CAMBRICON/INNOLIGHT/HYPE2/PAPER). Probed the **real**
+Hyperliquid (read-only `/info`): those markets are listed on the `para` dex but
+have **no book and no mark at all** — they are pre-launch. The mirror is
+faithful: the sim's `para` dex lists all 40 configured coins, 33 have live
+books (bid/ask identical to the real venue's), and the 7 uncalibrated ones are
+empty on the sim for the same reason they are empty on the real venue. Dex
+parity is exact: `perpDexs` serves all 10 builder dexes (xyz, flx, vntl, hyna,
+km, abcd, cash, para, mkts, io).
+
+So the advisory is not a warm-up that time clears and not a backfill gap — it
+clears when Hyperliquid opens those markets and the relay starts carrying their
+books. The risk-engine's warm-up deadline escape hatch is what makes the wait
+honest: verified firing at 04:47:26Z ("warm-up deadline reached … the named
+instruments are retried on the next hourly cycle") after the 900 s bound, so
+the boot cadence does not spin at 10 s forever.
+
+### Spot maker lane: the first credit served an empty coin name (2026-11-23)
+
+First live drill of the spot **maker** leg (an Alo bid inside the spread,
+crossed by another account's taker sell). The economics were exact on the first
+try — maker fee **0.2 PURR on a 36.51 notional = 4.0 bp**, charged in the
+received token, `crossed=false`, USDC debited exactly the notional — but the
+maker's `spotClearinghouseState` balance row served
+`{"coin": "", "token": 1}`: the **name** was empty. Root cause: the maker
+settlement (`settle_spot_maker`) and the reservation (`spot_reserve`) built
+their token refs with `coin: ""`, and a credit that **creates** the entry (an
+account's first hold of the token) stored the empty name; the taker path
+(`settle_spot_fill`) takes named refs and served correctly. Fix (`7360185`,
+release `relay-7360185`): both paths take the pair's named `TokenRef`s like the
+taker path; regression test `a_spot_maker_credit_names_the_token_it_creates`
+(408 tests, 0 lint). Verified live after the roll: `{"coin": "PURR", "token":
+1, "total": "499.8", "entryNtl": "36.521"}` — name, net-of-fee amount and cost
+basis all exact.
+
+### Position-TP/SL and the cancel flags: verified, nothing to fix (2026-11-23)
+
+- **`grouping: positionTpsl`** stays refused by name (the documented fail-closed
+  decision): the parent/child lifecycle (children placed on the parent's fill,
+  position-resized) modeled as plain orders would diverge silently. The serving
+  shape is already full parity — `frontendOpenOrders`/`orderStatus` carry
+  `isPositionTpsl`, `children`, `orderType`, and the firing-direction
+  `triggerCondition` vocabulary. Plain trigger orders remain the product's
+  protective-stop path.
+- **`f: true` fast cancel** refuses trigger orders with the venue's string
+  ("Fast cancel cannot cancel a trigger order.") — verified live on an armed
+  SL; a normal cancel succeeds. Unit-tested.
+- **TP/SL pre-validation**: a trigger without a position is refused
+  ("TP/SL orders must be reduce-only"); a reduce-only trigger that would
+  increase the position is refused — both the venue's rules, verified live.
+- **`updateLeverage`** to cross on `xyz:QNT` is refused ("does not allow cross
+  margin") — the coin's margin table is enforced.
+- **`/control/crash|rally`** take a magnitude `pct` in (0, 100); the direction
+  is the endpoint's name. A controlled −5 % move moved the mark exactly
+  −5.000 %, and the account's AV moved by exactly `sz × Δmark` (−7.22950 on a
+  5-QNT long) — the live-delta surface portfolio runtime reads is honest.
+- **Isolated accounting re-verified, not changed**: the served identity is
+  `accountValue = totalRawUsd + Σ sign·positionValue` (measured against the
+  real venue, per the `assemble` notes); the equity closes as
+  wallet + isolated margin + unrealized to the digit. A drill assertion built
+  on `raw + Σ unrealizedPnl` was the wrong identity — no code change.
