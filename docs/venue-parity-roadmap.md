@@ -44,6 +44,41 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The wire path, the onchain bridge, and two positions on one account — verified live (2026-11-23)
+
+The report's "no order path" is closed on the real `/exchange` surface (not
+only the control door):
+
+* **`venue-order` posts the venue's own envelope** (`{"type":"order","orders":
+  [{"a":110001,"b":true,"p":"359.1","s":"1","t":{"limit":{"tif":"Alo"}}}]}`)
+  and answers in the venue's shapes: `{"resting":{"oid":583}}` for the ALO,
+  then the resting bid **filled at its own limit** (two increments, entry
+  359.10) when the live book crossed it — a simulated maker is filled by the
+  real market's move, not by a script. The close answered
+  `{"filled":{"avgPx":"358.49","oid":584,"totalSz":"1.0"}}`; `venue-cancel`
+  answered `{"statuses":["success"]}`. Round trip identity: −0.61 gross −
+  0.0430 fees = −0.6530, and `userFills` serves it newest-first (the 20 s
+  "miss" was a tail-vs-head read error, not a lag: `userFills[0]` is the
+  newest fill).
+* **The venue's own rules refuse correctly**: a 3-lot para order below the
+  $10 minimum ("Order must have minimum value of $10"), and a 6-significant-
+  figure price ("Order price has more than 5 significant figures").
+* **The onchain bridge is exact.** Chain-999 precompiles against the venue's
+  own state for the drill agent: `0x0810 coreUserExists` = 1, `0x0801
+  spotBalance` = 97 149 327 800 (971.493278 USDC at 1e8 wei), `0x0803
+  withdrawable` = 0 (empty default dex), `0x080f accountMarginSummary` per
+  dex = the served figures verbatim (including a negative AV as
+  two's-complement, converging to the post-disposal value on the next pass).
+  The margin agent's own onchain reads see the true venue state — the
+  recall-reads-zero class cannot recur silently here.
+* **Two venue positions on one account fold account-once.** With 1
+  `xyz:TSLA` and 1 `xyz:GOLD` open on the loan's agent, the health row's
+  `venue_equity_usd` = 1768.2872 (the whole account, both positions and the
+  spot), while the enforceable numerator stayed 1454.9948 and HF 1.497689 —
+  the R5 cap holds with a multi-position account, and the provenance carries
+  **one** leg (the position's debt), not one per venue position: the
+  account-once assembly measured, not assumed.
+
 ### Market fidelity, measured against the real venue (2026-11-23)
 
 Read-only probes of the real Hyperliquid beside the mirror's served data,
