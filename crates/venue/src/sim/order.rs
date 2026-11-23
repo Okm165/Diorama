@@ -647,6 +647,7 @@ impl Sim {
     /// cap are the caller's gate (`authorize_builder`); here the fee rides the
     /// order into its fills (the immediate take) and its resting remainder
     /// (the later maker fills).
+    #[allow(clippy::too_many_lines)] // one placement decision: validate, take, rest the remainder, terminate
     pub(crate) fn place_with_builder(
         &self,
         feed: &MarketFeed,
@@ -686,6 +687,9 @@ impl Sim {
             let oid = self.place_alo(feed, placer, req)?;
             return Ok(resting_only(oid));
         }
+        // A marketable GTC is refused whole before it trades a slice (see
+        // `require_marketable_gtc_margin`).
+        self.require_marketable_gtc_margin(feed, address, req)?;
         // The venue's self-trade rule: the taker's own crossing resting orders
         // are expired, not matched.
         self.expire_self_crossing(address, feed, req)?;
@@ -697,9 +701,99 @@ impl Sim {
         } else {
             None
         };
-        let remainder = req.size - fill.as_ref().map(|f| f.total_sz).unwrap_or(Decimal::ZERO);
-        let resting = self.rest_remainder(feed, placer, req, remainder)?;
+        let filled_sz = fill.as_ref().map_or(Decimal::ZERO, |f| f.total_sz);
+        let remainder = req.size - filled_sz;
+        // A remainder the account can no longer carry is canceled, never
+        // reported as a failed order: the take is a fact. With the up-front
+        // check above this is the rare intra-order case (a mark moved between
+        // the check and the fill), and the client must not be told an order it
+        // was filled on did not happen.
+        let resting = match self.rest_remainder(feed, placer, req, remainder) {
+            Ok(resting) => resting,
+            Err(error) if filled_sz > Decimal::ZERO => {
+                tracing::warn!(
+                    account = %address,
+                    coin = %req.coin,
+                    %error,
+                    "resting remainder canceled: margin no longer available after the take"
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        // **An order that never rests still ends** (see `record_terminal`).
+        if resting.is_none() {
+            if let Some(fill) = &fill {
+                self.record_terminal(placer, req, fill, remainder)?;
+            }
+        }
         Ok(Placed { fill, resting })
+    }
+
+    /// **The whole order's margin is checked before it matches.** A marketable
+    /// GTC fills part and rests the remainder; checking only the remainder after
+    /// the take answered "Insufficient margin to place order." to a client that
+    /// had already been filled (measured 2026-11-23: a 120-lot SNDK GTC took
+    /// 11.988 and then failed). The venue refuses an order it cannot carry
+    /// without trading any of it, so the full size is reserved at the order's
+    /// own price up front. Only an opening GTC can take and rest: an IOC is
+    /// checked on its fill, an ALO never crosses, a reduce-only needs no margin.
+    fn require_marketable_gtc_margin(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        req: &Order,
+    ) -> Result<()> {
+        if req.tif == Tif::Gtc && !req.reduce_only {
+            if let Some(px) = req.limit_px {
+                self.require_order_margin(feed, address, req, (px, req.size))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the terminal state of an order that never rested: `Filled` when
+    /// the take covered the order (or a GTC filled whole), `Canceled` for an
+    /// IOC's unfilled remainder (or a remainder the account could not carry).
+    /// The row is what `orderStatus` answers from and what `orderUpdates`
+    /// diffs to push `filled`/`canceled`; without it the order is invisible to
+    /// both after its fills.
+    fn record_terminal(
+        &self,
+        placer: Placer,
+        req: &Order,
+        fill: &Fill,
+        remainder: Decimal,
+    ) -> Result<()> {
+        let status = if remainder <= Decimal::ZERO {
+            TerminalStatus::Filled
+        } else {
+            TerminalStatus::Canceled
+        };
+        let filled_ntl = super::account::mul(fill.total_sz, fill.avg_px, "filled notional")?;
+        let order = RestingOrder {
+            oid: fill.oid,
+            account: placer.address,
+            coin: req.coin.clone(),
+            side: req.side(),
+            px: req.limit_px.unwrap_or(fill.avg_px),
+            sz: remainder.max(Decimal::ZERO),
+            orig_sz: req.size,
+            reduce: req.reduce(),
+            tif: req.tif,
+            cloid: req.cloid,
+            trigger: req.trigger,
+            placed_ms: crate::now_ms(),
+            filled_sz: fill.total_sz,
+            filled_ntl,
+            builder: placer.builder,
+            spot_hold: None,
+        };
+        let limit = self.terminal_orders;
+        self.mutate_state(|st| {
+            terminalize(&mut st.terminal, order, status, fill.total_sz, limit);
+            Ok(())
+        })
     }
 
     /// Spot taker fee: the venue's base tier is 0.070 % (perp taker is 0.045 %;
@@ -3159,6 +3253,98 @@ mod tests {
         assert!(
             format!("{err}").contains("Reduce only order would increase position."),
             "{err}"
+        );
+    }
+
+    /// **A marketable GTC is refused whole, before it trades a slice.** A GTC
+    /// sized past the account's margin but crossing real depth used to take
+    /// its fill and *then* fail the remainder's margin check, so the client saw
+    /// "Insufficient margin to place order." after being filled (measured
+    /// 2026-11-23: a 120-lot SNDK GTC took 11.988 and errored). The venue
+    /// refuses an order it cannot carry without trading any of it: no fill, no
+    /// position, the balance untouched.
+    #[test]
+    fn a_marketable_gtc_is_refused_whole_before_it_trades() {
+        // $10 of margin at 10x carries ~$100 of ETH at ~101: ~0.99 units. The
+        // ask depth is 5 units, so a 3-unit GTC crosses ~$303 and cannot be
+        // carried whole -- but it would fill ~1 unit before hitting the wall.
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "10");
+        let mut gtc = Order {
+            coin: "ETH".into(),
+            is_buy: true,
+            size: "3".parse().unwrap(),
+            limit_px: Some("101".parse().unwrap()),
+            tif: Tif::Gtc,
+            reduce_only: false,
+            cloid: None,
+            trigger: None,
+        };
+        let err = sim.place(&feed, a, &gtc).unwrap_err();
+        assert!(
+            format!("{err}").contains("Insufficient margin to place order."),
+            "refused up front: {err}"
+        );
+        let account = sim.account(a).unwrap().unwrap();
+        assert!(
+            account.positions.get("ETH").is_none_or(|p| p.szi.is_zero()),
+            "no slice traded before the refusal"
+        );
+        assert_eq!(
+            account.perp_balance(""),
+            "10".parse().unwrap(),
+            "the balance is untouched"
+        );
+        // A GTC the account *can* carry the whole of still fills part and rests
+        // the rest under one oid (the venue's rule, unchanged).
+        gtc.size = "0.5".parse().unwrap();
+        let placed = sim.place(&feed, a, &gtc).unwrap();
+        assert!(placed.fill.is_some(), "the affordable GTC takes its slice");
+    }
+
+    /// **An order that never rests still ends, visibly.** A full IOC take left
+    /// no terminal row, so `orderStatus` could not answer for it and
+    /// `orderUpdates` never pushed `filled` (measured 2026-11-23: an IOC fill
+    /// produced zero `orderUpdates` frames while its `userFills` fired). The
+    /// venue records it terminal; the mirror now does too -- `Filled` for a
+    /// full take, `Canceled` for an IOC's unfilled remainder.
+    #[test]
+    fn an_order_that_never_rests_is_terminal_and_visible() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let placed = sim.place(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
+        let fill = placed.fill.expect("the IOC takes the visible depth");
+        let terminal = sim
+            .terminal_by_oid(a, fill.oid)
+            .unwrap()
+            .expect("a full IOC take is terminal, not invisible");
+        assert_eq!(terminal.status, TerminalStatus::Filled);
+        assert_eq!(terminal.filled_sz, "0.1".parse().unwrap());
+        assert!(terminal.avg_px > Decimal::ZERO);
+        // An IOC that only partly fills records the unfilled remainder as
+        // canceled, with what did fill kept.
+        sim.place(&feed, a, &ioc(Side::Sell, "0.1")).unwrap();
+        let mut partial = ioc(Side::Buy, "6");
+        partial.limit_px = Some("101".parse().unwrap());
+        let placed = sim.place(&feed, a, &partial).unwrap();
+        let fill = placed.fill.expect("it takes the visible depth");
+        assert!(fill.total_sz > Decimal::ZERO && fill.total_sz < "6".parse().unwrap());
+        let terminal = sim
+            .terminal_by_oid(a, fill.oid)
+            .unwrap()
+            .expect("the partial IOC is terminal too");
+        assert_eq!(terminal.status, TerminalStatus::Canceled);
+        assert_eq!(terminal.filled_sz, fill.total_sz);
+        assert_eq!(
+            terminal.order.sz,
+            "6".parse::<Decimal>().unwrap() - fill.total_sz,
+            "the unfilled remainder is the canceled size"
         );
     }
 
