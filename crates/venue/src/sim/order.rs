@@ -590,6 +590,10 @@ pub(crate) enum TerminalStatus {
     /// because its account could not carry the fill.
     #[serde(rename = "marginCanceled")]
     MarginCanceled,
+    /// The venue's `triggered`: a trigger order that fired. Its own oid ends
+    /// here (the resulting market order carries the fill under its cloid); the
+    /// real venue serves `triggered`, not `canceled`, for this order.
+    Triggered,
 }
 
 /// One terminal order (a bounded history so `orderStatus` can answer for a
@@ -1979,6 +1983,22 @@ impl Sim {
             oid,
             CancelMode {
                 status: TerminalStatus::MarginCanceled,
+                speed: CancelSpeed::Normal,
+            },
+        )
+    }
+
+    /// A trigger that fires ends its own oid with the venue's `triggered`
+    /// status (docs' order-status list); the fill belongs to the resulting
+    /// market order, which carries the trigger's cloid. Serving `canceled`
+    /// here would read as the user's cancel on every fired stop.
+    pub(crate) fn mark_triggered(&self, account: Address, coin: &str, oid: u64) -> Result<()> {
+        self.cancel_with(
+            account,
+            coin,
+            oid,
+            CancelMode {
+                status: TerminalStatus::Triggered,
                 speed: CancelSpeed::Normal,
             },
         )
@@ -4311,6 +4331,59 @@ mod tests {
         assert!(refused.is_err(), "a take sell below the mid is refused");
         sim.place(&feed, a, &trigger(Side::Sell, Tpsl::Tp, "110"))
             .unwrap();
+    }
+
+    /// **A fired trigger ends its own oid with the venue's `triggered` status**,
+    /// not `canceled` (which reads as the user's own cancel). The fill belongs
+    /// to the resulting market order — which carries the trigger's cloid — so
+    /// `orderStatus(trigger_oid)` is the venue's `triggered` and the cloid
+    /// resolves to the fill (measured live 2026-11-23: the sim served
+    /// `canceled` before this).
+    #[test]
+    fn a_fired_trigger_reports_the_triggered_status() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "10")], &[("101", "10")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap(); // long 1 at 101
+        let mut stop = ioc(Side::Sell, "1");
+        stop.tif = Tif::Gtc;
+        stop.limit_px = Some("100".parse().unwrap());
+        stop.reduce_only = true;
+        stop.cloid = Some("0x00000000000000000000000000000077".parse().unwrap());
+        stop.trigger = Some(Trigger {
+            is_market: true,
+            trigger_px: "99".parse().unwrap(),
+            tpsl: Tpsl::Sl,
+        });
+        let oid = sim.place(&feed, a, &stop).unwrap().resting.expect("the stop arms");
+        // The mark crosses the stop: the next tick fires it.
+        let now = crate::now_ms();
+        feed.put_ctx(
+            "ETH".into(),
+            crate::wire::test_ctx("98", "98"),
+            now,
+        );
+        sim.evaluate(&feed).unwrap();
+
+        let terminal = sim
+            .terminal_by_oid(a, oid)
+            .unwrap()
+            .expect("the trigger's own row");
+        assert_eq!(terminal.status, TerminalStatus::Triggered);
+        assert_eq!(
+            crate::api::info::terminal_status_label(terminal.status),
+            "triggered",
+            "the served orderStatus vocabulary"
+        );
+        let fill = sim.user_fills(a).unwrap().pop().expect("the close filled");
+        assert_eq!(fill.dir, "Close Long");
+        assert_eq!(
+            fill.cloid,
+            Some("0x00000000000000000000000000000077".parse().unwrap()),
+            "the resulting order carries the trigger's cloid"
+        );
     }
 
     /// The scheduled-cancel cap (docs): "The max number of triggers per day is

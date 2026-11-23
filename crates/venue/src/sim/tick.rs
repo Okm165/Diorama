@@ -214,12 +214,7 @@ impl Sim {
             if !fires {
                 continue;
             }
-            let _ = self.cancel(
-                r.account,
-                &r.coin,
-                r.oid,
-                crate::sim::order::CancelSpeed::Normal,
-            );
+            let _ = self.mark_triggered(r.account, &r.coin, r.oid);
             let order = crate::sim::order::Order {
                 coin: r.coin.clone(),
                 is_buy: r.side.is_buy(),

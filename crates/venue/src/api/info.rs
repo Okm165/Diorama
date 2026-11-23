@@ -885,6 +885,7 @@ pub(crate) fn terminal_status_label(status: crate::sim::order::TerminalStatus) -
         crate::sim::order::TerminalStatus::Filled => "filled",
         crate::sim::order::TerminalStatus::Canceled => "canceled",
         crate::sim::order::TerminalStatus::MarginCanceled => "marginCanceled",
+        crate::sim::order::TerminalStatus::Triggered => "triggered",
     }
 }
 
