@@ -63,6 +63,59 @@ bit-for-bit (`venue_equity 971.4933`, numerator `1454.9908`, HF `1.497685`):
 two positions, a funding boundary and two taker closes moved the venue's own
 books and left the enforceable fold untouched — the R5 separation end to end.
 
+### Two serving-cache leaks and a liquidation, measured live (2026-11-23)
+
+**A correlation a few ulps outside `[-1, 1]` refused the whole portfolio
+margin at scan rate, and self-cleared.** Measured 01:30–01:55Z: the unified
+book `2e683c93…` was refused **1,736 times in 25 minutes** (~70/min, one
+`CorrelationOutOfBand { field: "factor_correlation", value:
+1.0000000000000002 }` per HF fold), leaving its margin value and draw capacity
+NULL — a draw on that book would have been refused. The value is the PSD
+projection's own ~1e-12 reconstruction noise (`assemble` writes exactly 1.0,
+`nearest_correlation` perturbs it; measured in a test as
+`0.9999999999999997`). The band check was the module's **only** exact
+comparison — the diagonal, symmetry, same-series identity and PSD pivots all
+state 1e-9. One boundary, one tolerance (`302b81d4`, release
+`local-20261123-302b81d4`; regression test at the assemble/projection/
+validator seam `e3e329b2`); a value beyond 1e-9 is still a typed refusal,
+never a clamp.
+
+**The per-position health row is a serving cache too.** `ccda2db953…` (the
+shared-agent Failed book) changed status at 17:05Z by a path that skips the
+transition reactor and kept a `position_health` row frozen at 11:46 — the last
+fold before its failure, served as if the book were still live. The reactor
+deletes the row outside `HEALTH_ROW_LIVE` on its own transitions; the scan's
+orphan sweep (added for `portfolio_health`/`portfolio_admissions` the pass
+before) now applies that same literal rule to `position_health` (`6135a0eb`,
+release `local-20261123-6135a0eb`). Live: the stale row was gone one scan
+after the roll, and the served set is exactly the 8 Active books.
+
+**The account-once fold spans every HIP-3 dex.** With one `xyz:NVDA` long and
+one `para:TOTAL2` long open on the loan's agent, `venue_equity_usd` =
+1770.7276 = 971.4933 spot + 499.9581 xyz + 299.2142 para (marks moved between
+reads), the enforceable numerator stayed 1454.9948 / HF 1.497689, and the
+provenance still carried **one** leg. The lender's term rose with the account
+(1743.20 = the seizure cap over both dexes), not with either position alone.
+
+**Price fidelity, checked against the real venue's own `/info` at the same
+minute**: HYPE 61.8355 real / 61.8325 mirror (−0.5 bp), BTC 60712.5 / 60705.5
+(−1.2 bp), ETH 1705.85 / 1705.75 (−0.6 bp). The mirror's marks are the real
+market's, poll-aged, not a model.
+
+**Liquidation, exercised deterministically on a disposable dealt account**
+(`/control/crash` on `xyz:SNDK`, a coin outside `VENUE_BOOK_FEEDS` so no σ
+sample is contaminated): 1 000 USDC margin, 98 long at 81.661592 (two book
+levels, 0.4 bp of impact), 10× max leverage, maintenance 400.11 (5 % of
+notional, from the real meta's tier). A 15 % crash owned the whole market
+(mark/oracle/book shifted by one ratio) and the venue liquidated within
+**1.4 s at the shifted book's own bid** 69.392439, `closedPnl
+−1202.3769667` = 98 × (69.392439 − 81.661592) exactly, `fee 0` (the venue's
+documented no-clearance-fee rule), `liquidation.method "market"`. The account
+was served at −203.10 — an uncovered gap loss, honestly negative rather than
+floored: the lender's waterfall is what turns it into a capped claim. The
+price hand-back restored the live book (81.768/81.779), the deficit was dealt
+up and the account cleared; nothing else held the coin.
+
 ### The wire path, the onchain bridge, and two positions on one account — verified live (2026-11-23)
 
 The report's "no order path" is closed on the real `/exchange` surface (not
