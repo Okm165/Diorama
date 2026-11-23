@@ -44,6 +44,25 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### HIP-3 funding across a boundary, on two positions, one tick (2026-11-23)
+
+The `xyz` dex's funding was charged live on the two open positions at the
+02:00:00Z boundary — both in the **same tick** (`time 1795399200000`), each
+with the boundary's own rate and oracle price:
+
+* `xyz:GOLD` 1 long: rate 1.5553e−05, usdc **−0.055996661**; implied price
+  3600.3768 = the boundary oracle (the long **pays** on a positive rate).
+* `xyz:TSLA` 1 long: rate 6.25e−06, usdc **−0.002242625**; implied price
+  358.82 = the boundary oracle.
+* The identity `usdc = −szi × oracle × rate` closes on the boundary's own
+  figures (the current oracle had already moved on), and both payments landed
+  on the perp ledger, not the spot one.
+
+After the closes and the disposal the health row returned to its baseline
+bit-for-bit (`venue_equity 971.4933`, numerator `1454.9908`, HF `1.497685`):
+two positions, a funding boundary and two taker closes moved the venue's own
+books and left the enforceable fold untouched — the R5 separation end to end.
+
 ### The wire path, the onchain bridge, and two positions on one account — verified live (2026-11-23)
 
 The report's "no order path" is closed on the real `/exchange` surface (not
