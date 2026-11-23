@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-venue-engine:relay-db79180
+          image: localhost/diorama-venue-engine:relay-7360185
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # No env: the configuration is the mounted specialization file
