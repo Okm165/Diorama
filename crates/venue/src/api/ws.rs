@@ -135,6 +135,10 @@ pub(crate) enum Subscription {
     /// The best bid and ask of a coin's book, pushed when either changes.
     #[serde(rename = "bbo")]
     Bbo { coin: String },
+    /// The public trade tape for a coin: new trades only, as the venue pushes
+    /// them (`{"channel":"trades","data":[...]}`).
+    #[serde(rename = "trades")]
+    Trades { coin: String },
     /// The account's order status changes (`open`, `filled`, `canceled`, ...).
     #[serde(rename = "orderUpdates")]
     OrderUpdates { user: Address },
@@ -209,6 +213,11 @@ pub(crate) enum WsPush {
     ActiveAssetData { data: ActiveAssetData },
     #[serde(rename = "bbo")]
     Bbo { data: serde_json::Value },
+    /// The public tape's new entries (the venue's `trades` frame).
+    #[serde(rename = "trades")]
+    Trades {
+        data: Vec<crate::feed::MarketTrade>,
+    },
     #[serde(rename = "orderUpdates")]
     OrderUpdates { data: serde_json::Value },
     /// The `userEvents` subscription's frames (the venue's channel is `user`).
@@ -342,6 +351,8 @@ enum Mem {
     Candle(CandleSub),
     /// The newest fill id (`tid`) already pushed.
     Fills(Option<u64>),
+    /// The newest **market** trade id (`tid`) already pushed on the tape.
+    Trades(Option<u64>),
     /// The newest funding `(time, coin)` already pushed.
     Fundings(Option<(u64, String)>),
     /// The last best bid/ask pushed.
@@ -375,6 +386,7 @@ fn coin_of(sub: &Subscription) -> Option<&str> {
         Subscription::ActiveAssetCtx { coin }
         | Subscription::L2Book { coin, .. }
         | Subscription::Bbo { coin }
+        | Subscription::Trades { coin }
         | Subscription::ActiveAssetData { coin, .. } => Some(coin),
         Subscription::L2 { c, .. } => Some(c),
         _ => None,
@@ -703,6 +715,14 @@ fn admit(sub: &Subscription, state: &ApiState) -> Result<Mem, Refusal> {
             has_book(coin)?;
             Ok(Mem::Bbo(None))
         }
+        // The tape exists only for a coin the venue trades; the same book gate
+        // as every market channel (an unlisted coin is a typed refusal, never a
+        // silent empty stream). A listed coin's tape may legitimately be empty
+        // until the next real trade.
+        Subscription::Trades { coin } => {
+            has_book(coin)?;
+            Ok(Mem::Trades(None))
+        }
         Subscription::OrderUpdates { user } => {
             account_ok(user)?;
             Ok(Mem::Orders(None))
@@ -794,6 +814,14 @@ pub(super) fn pushes(live: &mut Live, state: &ApiState, now_ms: u64) -> Vec<Stri
             user_fundings_push(state, *user, cursor)
         }
         (Subscription::Bbo { coin }, Mem::Bbo(last)) => bbo_push(state, coin, last, now_ms),
+        (Subscription::Trades { coin }, Mem::Trades(last)) => {
+            let fresh = state.feed.market_trades_since(coin, *last);
+            let Some(newest) = fresh.last().map(|trade| trade.tid) else {
+                return Vec::new();
+            };
+            *last = Some(newest);
+            encode(&WsPush::Trades { data: fresh })
+        }
         (Subscription::OrderUpdates { user }, Mem::Orders(seen)) => {
             order_updates_push(state, *user, seen)
         }
@@ -1529,6 +1557,67 @@ mod tests {
                 other => panic!("unexpected channel {other}"),
             }
         }
+    }
+
+    /// **The public tape pushes each trade once.** The venue's `trades` channel
+    /// carries the market's tape, not the account's: a subscriber sees the
+    /// entries that arrived after its last push and nothing twice, and the
+    /// frame parses through the client's own vocabulary.
+    #[test]
+    fn the_trade_tape_pushes_new_trades_once() {
+        let feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
+        feed.put_book(test_book("BTC", "100"), 1_000);
+        let state = api_state(feed.clone());
+        let mut subs: Vec<Live> = Vec::new();
+        let ack = subscribe_to(
+            &state,
+            &mut subs,
+            &serde_json::json!({"type":"trades","coin":"BTC"}),
+        )
+        .expect("trades is a served channel");
+        assert_eq!(ack["channel"], "subscriptionResponse");
+        assert_eq!(
+            ack["data"]["subscription"],
+            serde_json::json!({"type":"trades","coin":"BTC"})
+        );
+        assert!(
+            frames_of(&mut subs[0], &state).is_empty(),
+            "an empty tape pushes nothing (the venue never sends an empty frame)"
+        );
+        let trade = |tid: u64, px: &str, side: &str| crate::feed::MarketTrade {
+            coin: "BTC".into(),
+            side: side.into(),
+            px: px.parse().unwrap(),
+            sz: "0.5".parse().unwrap(),
+            time: 1_700_000_000_000 + tid,
+            hash: format!("0x{tid:064x}"),
+            tid,
+            users: vec!["0xaa".into(), "0xbb".into()],
+        };
+        feed.put_market_trades(vec![trade(7, "101.5", "B"), trade(8, "101.4", "A")]);
+        let frames = frames_of(&mut subs[0], &state);
+        assert_eq!(frames.len(), 1, "one frame carries the batch");
+        assert_eq!(frames[0]["channel"], "trades");
+        let data = frames[0]["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["tid"], 7);
+        assert_eq!(data[0]["side"], "B");
+        assert_eq!(data[0]["px"], "101.5");
+        assert_eq!(data[1]["tid"], 8);
+        let parsed: WsMessage = serde_json::from_value(frames[0].clone()).unwrap();
+        assert!(
+            matches!(parsed, WsMessage::Trades { data } if data.len() == 2),
+            "the mirror's tape parses through the real venue's client shape"
+        );
+        assert!(
+            frames_of(&mut subs[0], &state).is_empty(),
+            "already-sent entries are never repeated"
+        );
+        feed.put_market_trades(vec![trade(9, "101.6", "B")]);
+        let frames = frames_of(&mut subs[0], &state);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["data"].as_array().unwrap().len(), 1);
+        assert_eq!(frames[0]["data"][0]["tid"], 9);
     }
 
     /// The subscription lifecycle: ack, at-most-once, unsubscribe, and the

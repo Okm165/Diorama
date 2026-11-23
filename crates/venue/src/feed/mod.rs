@@ -33,7 +33,7 @@ use diorama_devnet::store;
 use metrics::FeedMetrics;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -107,6 +107,30 @@ pub(crate) enum BookAge {
 /// is keyed on.
 const FUNDING_HOUR_MS: u64 = 3_600_000;
 
+/// The most market trades kept per coin. The venue's `trades` push carries only
+/// new entries (no history), so the tape is a short rolling window for the
+/// downstream lane and for a late subscriber that asked a moment too soon.
+const MARKET_TRADE_TAPE: usize = 256;
+
+/// One trade on the venue's public tape — the `trades` websocket channel's
+/// entry, byte-for-byte the real venue's shape: `side` is the **taker** side
+/// (`"B"`/`"A"`), `users` the buyer and seller, `tid` unique and increasing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MarketTrade {
+    pub coin: String,
+    pub side: String,
+    #[serde(serialize_with = "crate::wire::decimal_nano::serialize")]
+    pub px: Decimal,
+    #[serde(serialize_with = "crate::wire::decimal_nano::serialize")]
+    pub sz: Decimal,
+    pub time: u64,
+    pub hash: String,
+    pub tid: u64,
+    /// The buyer and the seller, in the venue's order.
+    pub users: Vec<String>,
+}
+
 /// The live cache (never persisted: it is a cache, and a stale file would
 /// masquerade as fresh data).
 #[derive(Default)]
@@ -133,6 +157,10 @@ struct Cache {
     registry: DexRegistry,
     meta_at: Option<u64>,
     spot_meta: Option<crate::wire::SpotMeta>,
+    /// The public trade tape per coin (newest last), filled by the upstream
+    /// `trades` stream. A cache, never persisted: a reconnect is served only
+    /// new trades, exactly as the venue serves them.
+    trades: BTreeMap<String, VecDeque<MarketTrade>>,
     ctxs: BTreeMap<String, AssetCtx>,
     ctx_at: BTreeMap<String, u64>,
     /// Each coin's published funding-rate **step history** — `(at_ms, rate)`
@@ -799,6 +827,48 @@ impl MarketFeed {
         c.books.insert(book.coin.clone(), book);
         drop(c);
         self.notify();
+    }
+
+    /// Fold the upstream `trades` stream's entries into the public tape. The
+    /// venue pushes only new trades (no history), so each entry is appended and
+    /// the coin's tape keeps the newest [`MARKET_TRADE_TAPE`]. The stall gate
+    /// drops live writes during the staleness drill, as every other live feed
+    /// write does; the change signal wakes the downstream lane.
+    pub(crate) fn put_market_trades(&self, trades: Vec<MarketTrade>) {
+        if trades.is_empty() {
+            return;
+        }
+        if self.stalled() {
+            tracing::debug!(
+                trades = trades.len(),
+                "live trades dropped: the feed is stalled (the staleness drill)"
+            );
+            return;
+        }
+        let mut c = self.write();
+        for trade in trades {
+            let coin = trade.coin.clone();
+            let tape = c.trades.entry(coin).or_default();
+            tape.push_back(trade);
+            while tape.len() > MARKET_TRADE_TAPE {
+                tape.pop_front();
+            }
+        }
+        drop(c);
+        self.notify();
+    }
+
+    /// The coin's tape entries with `tid` greater than `after` (arrival order,
+    /// oldest first). `None` is a subscriber's first read: its whole window.
+    pub(crate) fn market_trades_since(&self, coin: &str, after: Option<u64>) -> Vec<MarketTrade> {
+        let c = self.read();
+        let Some(tape) = c.trades.get(coin) else {
+            return Vec::new();
+        };
+        tape.iter()
+            .filter(|trade| after.is_none_or(|last| trade.tid > last))
+            .cloned()
+            .collect()
     }
 
     /// Prune the coin's consumptions against the base it will serve (a live

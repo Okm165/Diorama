@@ -79,6 +79,12 @@ pub(crate) enum WsMessage {
     /// The `l2` feed: a snapshot, then diffs (see [`crate::feed::l2`]).
     #[serde(rename = "l2")]
     L2 { data: serde_json::Value },
+    /// The public tape: a list of new trades (no history; the venue sends only
+    /// what happened after the subscribe).
+    #[serde(rename = "trades")]
+    Trades {
+        data: Vec<crate::feed::MarketTrade>,
+    },
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "error")]
@@ -147,6 +153,9 @@ enum Subscription<'a> {
     /// diffs, not the throttled `l2Book`.
     #[serde(rename = "l2")]
     L2 { c: &'a str },
+    /// The public tape: new trades for the coin.
+    #[serde(rename = "trades")]
+    Trades { coin: &'a str },
 }
 
 #[derive(Debug, Serialize)]
@@ -447,6 +456,7 @@ impl WsClient {
             let subscription = match stream {
                 Stream::Book(coin) => Subscription::L2 { c: coin },
                 Stream::Ctx(coin) => Subscription::ActiveAssetCtx { coin },
+                Stream::Trades(coin) => Subscription::Trades { coin },
             };
             frames.push(Self::encode(method, subscription)?);
             match op {
@@ -467,9 +477,15 @@ impl WsClient {
             .iter()
             .filter(|s| matches!(s, Stream::Book(_)))
             .count() as u64;
-        self.feed
-            .metrics
-            .set_relay_streams(books, state.live.len() as u64 - books);
+        // The gauge names books and contexts; the tape streams are a third
+        // channel and stay out of the context count (they are still capped by
+        // the same ceiling, see `relay::desired`).
+        let ctxs = state
+            .live
+            .iter()
+            .filter(|s| matches!(s, Stream::Ctx(_)))
+            .count() as u64;
+        self.feed.metrics.set_relay_streams(books, ctxs);
         Ok(frames)
     }
 
@@ -522,7 +538,11 @@ impl WsClient {
                     "venue refused one coin subscription; keeping the session"
                 );
                 let now = crate::now_ms();
-                for stream in [Stream::Book(coin.clone()), Stream::Ctx(coin)] {
+                for stream in [
+                    Stream::Book(coin.clone()),
+                    Stream::Ctx(coin.clone()),
+                    Stream::Trades(coin),
+                ] {
                     state.live.remove(&stream);
                     self.feed.relay.refuse(stream, now);
                 }
@@ -583,6 +603,10 @@ impl WsClient {
                     _ => Frame::Control,
                 },
             },
+            WsMessage::Trades { data } => {
+                self.feed.put_market_trades(data);
+                Frame::Data
+            }
             WsMessage::Error { data } => Frame::Error(classify_subscription_error(
                 state.live.iter().map(Stream::coin),
                 &data,
@@ -672,6 +696,20 @@ mod tests {
         assert!(matches!(m, WsMessage::ActiveAssetCtx { .. }));
         let pong: WsMessage = serde_json::from_str(r#"{"channel":"pong"}"#).unwrap();
         assert!(matches!(pong, WsMessage::Pong));
+        // The venue's public tape: a list of trades, folded into the feed's
+        // per-coin tape (the shape measured on the real venue 2026-11-23).
+        let tape = r#"{"channel":"trades","data":[{"coin":"BTC","side":"A","px":"81280.5","sz":"0.0025","time":1795403548842,"hash":"0x759c2c1b785e42db77150449652de30207f60001135161ad1964d76e37521cc6","tid":455934785646454,"users":["0xba5f4f92f396e6de20d3dae5eefa65f4ecca806a","0xed8de5c194aa58df656a915912530f0ce8333e5b"]}]}"#;
+        let m: WsMessage = serde_json::from_str(tape).unwrap();
+        match m {
+            WsMessage::Trades { data } => {
+                assert_eq!(data.len(), 1);
+                assert_eq!(data[0].coin, "BTC");
+                assert_eq!(data[0].side, "A");
+                assert_eq!(data[0].tid, 455_934_785_646_454);
+                assert_eq!(data[0].users.len(), 2);
+            }
+            _ => panic!("trades expected"),
+        }
         let ack: WsMessage = serde_json::from_str(
             r#"{"channel":"subscriptionResponse","data":{"method":"subscribe"}}"#,
         )
@@ -741,6 +779,10 @@ mod tests {
         )
     }
 
+    fn trade_sub(coin: &str) -> String {
+        format!(r#"{{"method":"subscribe","subscription":{{"type":"trades","coin":"{coin}"}}}}"#)
+    }
+
     /// The first sync subscribes a context for every live coin of every dex
     /// (the delisted one waits until it is wanted); a wanted coin adds its
     /// book; a second sync with nothing changed sends nothing.
@@ -755,7 +797,11 @@ mod tests {
         assert!(frames(&client, &mut state, now).is_empty(), "nothing new");
 
         assert!(client.feed.want_book("xyz:TSLA"));
-        assert_eq!(frames(&client, &mut state, now), [sub("xyz:TSLA")]);
+        assert_eq!(
+            frames(&client, &mut state, now),
+            [sub("xyz:TSLA"), trade_sub("xyz:TSLA")],
+            "a wanted coin adds its book and its tape"
+        );
         assert_eq!(client.feed.metrics.relay_streams(), (1, 2));
     }
 
@@ -768,7 +814,7 @@ mod tests {
         let now = crate::now_ms();
         let _ = frames(&client, &mut state, now);
         let lease = client.feed.lease_coin("BTC").unwrap();
-        assert_eq!(frames(&client, &mut state, now), [sub("BTC")]);
+        assert_eq!(frames(&client, &mut state, now), [sub("BTC"), trade_sub("BTC")]);
         assert!(
             frames(&client, &mut state, now + 10 * relay::GRACE_MS).is_empty(),
             "a lease holds the stream"
@@ -781,8 +827,11 @@ mod tests {
         );
         assert_eq!(
             frames(&client, &mut state, released + relay::GRACE_MS + 2_000),
-            [r#"{"method":"unsubscribe","subscription":{"type":"l2","c":"BTC"}}"#],
-            "the stream goes after the grace"
+            [
+                r#"{"method":"unsubscribe","subscription":{"type":"l2","c":"BTC"}}"#,
+                r#"{"method":"unsubscribe","subscription":{"type":"trades","coin":"BTC"}}"#,
+            ],
+            "the book and its tape go after the grace"
         );
     }
 
@@ -800,7 +849,7 @@ mod tests {
         let mut after = frames(&client, &mut second, now);
         after.sort();
         assert_eq!(before, after);
-        assert_eq!(after.len(), 3, "two contexts and the wanted book");
+        assert_eq!(after.len(), 4, "two contexts, the wanted book and its tape");
     }
 
     /// The send budget bounds a resubscribe burst: the rest waits for the next

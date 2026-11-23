@@ -55,13 +55,17 @@ const SEND_BUDGET: usize = 1_200;
 pub(crate) enum Stream {
     Book(String),
     Ctx(String),
+    /// The public trade tape: new trades only, as the venue serves them. Wanted
+    /// exactly while a downstream client subscribes to the coin's `trades`, so
+    /// the upstream cost follows the demand (the lease's coin is the same one).
+    Trades(String),
 }
 
 impl Stream {
 #[allow(dead_code, reason = "the ws sync loop diffs with these (next port step)")]
     pub(crate) fn coin(&self) -> &str {
         match self {
-            Self::Book(coin) | Self::Ctx(coin) => coin,
+            Self::Book(coin) | Self::Ctx(coin) | Self::Trades(coin) => coin,
         }
     }
 }
@@ -222,6 +226,19 @@ impl Relay {
                 books += 1;
             }
         }
+        // The tape follows the same demand and the same cap: a coin someone
+        // watches is a coin whose trades a strategy may read.
+        let mut tapes = 0usize;
+        for coin in wanted {
+            let stream = Stream::Trades(coin.clone());
+            if tapes >= MAX_BOOKS || out.len() >= MAX_STREAMS {
+                break;
+            }
+            if !refused.contains_key(&stream) {
+                out.insert(stream);
+                tapes += 1;
+            }
+        }
         out
     }
 }
@@ -324,6 +341,8 @@ mod tests {
             Stream::Ctx("xyz:TSLA".into()),
             Stream::Book("xyz:TSLA".into()),
             Stream::Book("BTC".into()),
+            Stream::Trades("xyz:TSLA".into()),
+            Stream::Trades("BTC".into()),
         ]
         .into_iter()
         .collect();
@@ -340,6 +359,12 @@ mod tests {
         assert_eq!(books.len(), MAX_BOOKS);
         assert!(desired.contains(&Stream::Book("C0".into())));
         assert!(!desired.contains(&Stream::Book(format!("C{}", MAX_BOOKS + 1))));
+        // The tape follows the same priority order inside the overall ceiling
+        // (every wanted coin also carries its context, so the tapes take what
+        // the stream cap leaves).
+        assert!(desired.len() <= MAX_STREAMS);
+        assert!(desired.contains(&Stream::Trades("C0".into())));
+        assert!(!desired.contains(&Stream::Trades(format!("C{}", MAX_BOOKS + 1))));
     }
 
     /// The subscription cap: contexts keep their slots, books take what is
