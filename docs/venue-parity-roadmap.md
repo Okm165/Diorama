@@ -130,6 +130,47 @@ re-verified against real fills this pass: spot 7/4 bp, perp 4.5/1.5 bp, and
 HIP-3 `0.2 × the user's tier` (exact on clean samples) — the mirror's base-tier
 schedule is faithful.
 
+### Market-representativeness verification sweep (2026-11-23)
+
+Measured against the real venue / the served books, no assumption taken. Every
+figure below is from the live mirror (`relay-4b67461`), on disposable dealt
+accounts, flattened and cleared after each probe:
+
+* **Funding rates are the real market's.** Across **570** perp markets (default
+  dex + every HIP-3 dex), the mirror's `metaAndAssetCtxs.funding` equals the
+  real venue's: **378 bit-for-bit**, the rest within **5e-10** (print precision
+  only). A funding-carry strategy sees the real rate, not an approximation.
+* **Slippage is the real book's own walk.** A `$6,000` BTC IOC filled at
+  `avgPx` **identical** to a manual walk of the served asks (0.00 bp error,
+  first level 14.6 BTC deep), and the served book shrank by exactly the
+  consumed size (`14.63639 → 14.53838`). Multi-level walk is the same
+  merged-candidate walk, so a shallow market prices like its real book.
+* **Unrealized PnL is on the mark, not the mid.** A BTC long reported
+  `unrealizedPnl = (mark − entry) × szi` **exactly** (`−0.029` vs mid's
+  `−0.005`), and `positionValue = mark × |szi|` exactly — the venue's own
+  accounting.
+* **The maker queue is faithful, in both directions.** A sim maker behind the
+  live level at a worse price is **not** filled (a taker sells into the better
+  live bid, the maker stays open); a maker resting **inside the spread** (a
+  price the real book does not occupy) is filled at its own price. Fees are
+  asymmetric and exact: maker `crossed:false` at **0.3 bp**, taker
+  `crossed:true` at **0.9 bp** on a HIP-3 growth market (base 1.5/4.5 bp × the
+  `0.2` growth multiplier), and the maker's order terminalizes `filled`.
+* **The lending health row is the standard LTV health factor.** For the live
+  WETH loan: `hf_numerator` 1454.99 = collateral 1753.01 × **0.83** LTV; HF =
+  1454.99 / debt 971.49 = **1.4977**. Every live row carries a non-NULL draw
+  capacity (the old 1,736× `NULL` refusal is gone); the three rows with no
+  venue `account_address` are genuinely unfunded venue accounts, not a scan
+  miss.
+
+The only swarm friction this window was the **scheduled anvil-v restart at
+03:40** (one minute): indexer WS resets / chainlink re-read, operator
+`CollateralManager` code probe, cctp tip poll, one underwriter capacity read —
+all recovered, chain head continuous (age 0 s). The PM escrow close-cost
+warnings are the honest bounded prior (USDC collateral closes into USDC at 0;
+WHYPE at 4.79% because the measured probe cannot bound the full sale), and the
+risk engine's σ floor is the designed policy premium — neither is a defect.
+
 ### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
 
 Measured during the drill, then closed on purpose as a **bounded** finding: with
