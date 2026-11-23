@@ -309,9 +309,11 @@ fn terminalize(
     terminal: &mut std::collections::BTreeMap<u64, TerminalOrder>,
     order: RestingOrder,
     status: TerminalStatus,
-    filled_sz: Decimal,
     limit: usize,
 ) {
+    // The order carries what filled; the terminal row copies it (one source,
+    // never a caller-passed figure that can disagree with the order).
+    let filled_sz = order.filled_sz;
     let avg = super::account::ratio_or(order.filled_ntl, order.filled_sz, Decimal::ZERO);
     let oid = order.oid;
     terminal.insert(
@@ -626,6 +628,18 @@ pub(crate) struct Placed {
     pub resting: Option<u64>,
 }
 
+/// What a partial take hands to its resting remainder: the order's own oid and
+/// what already filled. The venue gives **one order one oid**, so the take's
+/// fill and the remainder's resting order are the same order: `origSz` is the
+/// whole order, `sz` the remainder, and `filled_sz`/`filled_ntl` carry the take
+/// so a later terminal report has the order's true average price.
+#[derive(Debug, Clone, Copy)]
+struct RestCarry {
+    oid: u64,
+    filled_sz: Decimal,
+    filled_ntl: Decimal,
+}
+
 /// The resting-only outcome (a trigger armed, an ALO posted): no fill.
 fn resting_only(oid: u64) -> Placed {
     Placed {
@@ -703,12 +717,26 @@ impl Sim {
         };
         let filled_sz = fill.as_ref().map_or(Decimal::ZERO, |f| f.total_sz);
         let remainder = req.size - filled_sz;
+        // **The remainder resumes the same order.** The venue gives one oid to
+        // an order, so a marketable order's take and its resting remainder share
+        // it. A fresh oid here split one order into two (measured 2026-11-23: a
+        // marketable GTC filled under oid 629 and rested under 630, so
+        // `orderStatus(629)` -- the oid the client was handed -- answered
+        // `unknownOid`). The take's oid is the order's identity.
+        let carry = match &fill {
+            Some(f) => Some(RestCarry {
+                oid: f.oid,
+                filled_sz: f.total_sz,
+                filled_ntl: super::account::mul(f.total_sz, f.avg_px, "filled notional")?,
+            }),
+            None => None,
+        };
         // A remainder the account can no longer carry is canceled, never
         // reported as a failed order: the take is a fact. With the up-front
         // check above this is the rare intra-order case (a mark moved between
         // the check and the fill), and the client must not be told an order it
         // was filled on did not happen.
-        let resting = match self.rest_remainder(feed, placer, req, remainder) {
+        let resting = match self.rest_remainder(feed, placer, req, remainder, carry) {
             Ok(resting) => resting,
             Err(error) if filled_sz > Decimal::ZERO => {
                 tracing::warn!(
@@ -791,7 +819,7 @@ impl Sim {
         };
         let limit = self.terminal_orders;
         self.mutate_state(|st| {
-            terminalize(&mut st.terminal, order, status, fill.total_sz, limit);
+            terminalize(&mut st.terminal, order, status, limit);
             Ok(())
         })
     }
@@ -882,7 +910,7 @@ impl Sim {
                 ));
             }
             let oid = self
-                .rest_spot_remainder(placer, req, req.size, (base.index, quote.index))?
+                .rest_spot_remainder(placer, req, req.size, (base.index, quote.index), None)?
                 .ok_or_else(|| Error::bad_request("Post only order could not rest."))?;
             return Ok(Placed {
                 fill: None,
@@ -1016,7 +1044,15 @@ impl Sim {
         // its limit, a sell reserves the base it sells (the venue's spot
         // `hold`, served in spotClearinghouseState).
         let remainder = req.size - filled - maker_sz;
-        let resting = self.rest_spot_remainder(placer, req, remainder, (base.index, quote.index))?;
+        // The remainder continues the same order: the take's oid and fill ride
+        // into it (see `RestCarry`).
+        let carry = (filled > Decimal::ZERO).then_some(RestCarry {
+            oid,
+            filled_sz: filled,
+            filled_ntl: notional,
+        });
+        let resting =
+            self.rest_spot_remainder(placer, req, remainder, (base.index, quote.index), carry)?;
         Ok(Placed { fill, resting })
     }
 
@@ -1073,7 +1109,6 @@ impl Sim {
                         &mut st.terminal,
                         done,
                         TerminalStatus::Filled,
-                        notional,
                         self.terminal_orders,
                     );
                 }
@@ -1131,12 +1166,14 @@ impl Sim {
 
     /// Reserve the remainder's balance and rest it (a Gtc or post-only spot
     /// order).
+    #[allow(clippy::too_many_arguments)] // one hold-and-rest call: the pair's tokens and the carried take are distinct inputs
     fn rest_spot_remainder(
         &self,
         placer: Placer,
         req: &Order,
         remainder: Decimal,
         tokens: (u32, u32),
+        carry: Option<RestCarry>,
     ) -> Result<Option<u64>> {
         if !matches!(req.tif, Tif::Gtc | Tif::Alo) || remainder <= Decimal::ZERO {
             return Ok(None);
@@ -1155,7 +1192,7 @@ impl Sim {
         self.with_account(placer.address, |account| {
             super::account::spot_reserve(account, token, reserved)
         })?;
-        let oid = self.rest_order(placer, req, (px, remainder))?;
+        let oid = self.rest_order_at(placer, req, (px, remainder), carry)?;
         self.with_state(|st| {
             if let Some(r) = st.resting.get_mut(&oid) {
                 r.spot_hold = Some(SpotHold { token, amount: reserved });
@@ -1239,12 +1276,14 @@ impl Sim {
 
     /// A Gtc remainder rests (after the venue's order-margin check); anything
     /// else, or a filled order, rests nothing.
+    #[allow(clippy::too_many_arguments)] // the market, the placer, the order, its remainder and the carried take are distinct inputs
     fn rest_remainder(
         &self,
         feed: &MarketFeed,
         placer: Placer,
         req: &Order,
         remainder: Decimal,
+        carry: Option<RestCarry>,
     ) -> Result<Option<u64>> {
         if req.tif != Tif::Gtc || remainder <= Decimal::ZERO {
             return Ok(None);
@@ -1253,7 +1292,7 @@ impl Sim {
             return Ok(None); // a market order cannot rest
         };
         self.require_order_margin(feed, placer.address, req, (px, remainder))?;
-        Ok(Some(self.rest_order(placer, req, (px, remainder))?))
+        Ok(Some(self.rest_order_at(placer, req, (px, remainder), carry)?))
     }
 
     /// The venue's order margin (docs: `availableToTrade` accounts for open
@@ -1653,7 +1692,6 @@ impl Sim {
                 &mut st.terminal,
                 done,
                 TerminalStatus::Filled,
-                sz,
                 self.terminal_orders,
             );
             Ok(())
@@ -1862,9 +1900,27 @@ impl Sim {
 
     /// Insert a resting order under a fresh oid.
     fn rest_order(&self, placer: Placer, req: &Order, at: (Decimal, Decimal)) -> Result<u64> {
+        self.rest_order_at(placer, req, at, None)
+    }
+
+    /// Rest an order. `carry` is `Some` when this continues a marketable order's
+    /// partial take: the remainder keeps the order's oid, `origSz` stays the
+    /// whole order, and the take's filled size/notional ride along (so the
+    /// order's terminal average is its true one). `None` allocates a fresh oid
+    /// for a brand-new resting order.
+    fn rest_order_at(
+        &self,
+        placer: Placer,
+        req: &Order,
+        at: (Decimal, Decimal),
+        carry: Option<RestCarry>,
+    ) -> Result<u64> {
         let (px, sz) = at;
         let account = placer.address;
-        let oid = self.next_oid()?;
+        let (oid, orig_sz, filled_sz, filled_ntl) = match carry {
+            Some(c) => (c.oid, req.size, c.filled_sz, c.filled_ntl),
+            None => (self.next_oid()?, sz, Decimal::ZERO, Decimal::ZERO),
+        };
         let order = RestingOrder {
             oid,
             account,
@@ -1872,14 +1928,14 @@ impl Sim {
             side: req.side(),
             px,
             sz,
-            orig_sz: sz,
+            orig_sz,
             reduce: req.reduce(),
             tif: req.tif,
             cloid: req.cloid,
             trigger: req.trigger,
             placed_ms: crate::now_ms(),
-            filled_sz: Decimal::ZERO,
-            filled_ntl: Decimal::ZERO,
+            filled_sz,
+            filled_ntl,
             builder: placer.builder,
             spot_hold: None,
         };
@@ -1957,7 +2013,6 @@ impl Sim {
                     &mut st.terminal,
                     done,
                     status,
-                    Decimal::ZERO,
                     self.terminal_orders,
                 );
                 Ok(())
@@ -3346,6 +3401,84 @@ mod tests {
             "6".parse::<Decimal>().unwrap() - fill.total_sz,
             "the unfilled remainder is the canceled size"
         );
+    }
+
+    /// **One order, one oid — even when it takes part and rests the rest.** A
+    /// marketable GTC used to fill under one oid and rest the remainder under a
+    /// second (measured 2026-11-23: fill oid 629, resting oid 630), so
+    /// `orderStatus(629)` — the oid handed back to the client — answered
+    /// `unknownOid`. The order's take and its remainder are the same order: the
+    /// oid is shared, `origSz` is the whole order, `sz` the remainder, and the
+    /// carried fill makes the eventual terminal average the order's true one.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one order's whole lifecycle: take, rest, second-account fill, terminal
+    fn a_partial_take_and_its_remainder_are_one_order_one_oid() {
+        // Ask depth 0.5 at 101: a 1.0 GTC buy takes 0.5 and rests 0.5.
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "0.5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let gtc = Order {
+            coin: "ETH".into(),
+            is_buy: true,
+            size: "1".parse().unwrap(),
+            limit_px: Some("101".parse().unwrap()),
+            tif: Tif::Gtc,
+            reduce_only: false,
+            cloid: None,
+            trigger: None,
+        };
+        let placed = sim.place(&feed, a, &gtc).unwrap();
+        let fill = placed.fill.expect("it takes the top level");
+        let rest_oid = placed.resting.expect("the remainder rests");
+        assert_eq!(
+            fill.oid, rest_oid,
+            "the take and the remainder share the order's oid"
+        );
+        assert_eq!(fill.total_sz, "0.5".parse().unwrap());
+        let resting = sim
+            .resting_by_oid(a, rest_oid)
+            .unwrap()
+            .expect("orderStatus finds the order by the oid it was handed");
+        assert_eq!(resting.sz, "0.5".parse().unwrap(), "the remainder");
+        assert_eq!(resting.orig_sz, "1".parse().unwrap(), "the whole order");
+        assert_eq!(resting.filled_sz, "0.5".parse().unwrap(), "the take carried");
+        // Still open, so it is not terminal yet.
+        assert!(sim.terminal_by_oid(a, rest_oid).unwrap().is_none());
+        // Another account sells into A's resting remainder (a self-trade would
+        // expire it, so the taker must be distinct). A's order fills the rest
+        // and terminalizes under the SAME oid with the whole order's size.
+        let b = Address::repeat_byte(0xbb);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: b,
+                class: DealClass::Perp,
+                coin: None,
+                dex: None,
+                amount: "1000".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        sim.place(&feed, b, &Order {
+            coin: "ETH".into(),
+            is_buy: false,
+            size: "0.5".parse().unwrap(),
+            limit_px: Some("101".parse().unwrap()),
+            tif: Tif::Ioc,
+            reduce_only: false,
+            cloid: None,
+            trigger: None,
+        })
+        .unwrap();
+        let terminal = sim
+            .terminal_by_oid(a, rest_oid)
+            .unwrap()
+            .expect("the filled remainder terminalizes under the same oid");
+        assert_eq!(terminal.status, TerminalStatus::Filled);
+        assert_eq!(terminal.filled_sz, "1".parse().unwrap(), "the whole order");
+        assert_eq!(terminal.order.orig_sz, "1".parse().unwrap());
     }
 
     /// Every refusal is by name: resting orders, reduce-only that would not
