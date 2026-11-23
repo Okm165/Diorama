@@ -63,6 +63,31 @@ bit-for-bit (`venue_equity 971.4933`, numerator `1454.9908`, HF `1.497685`):
 two positions, a funding boundary and two taker closes moved the venue's own
 books and left the enforceable fold untouched — the R5 separation end to end.
 
+### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
+
+Measured during the drill, then closed on purpose as a **bounded** finding: with
+one `xyz:SNDK` position (a real, unconfigured HIP-3 listing) on the loan's
+agent, the operator emitted 46 `portfolio-margin venue leg σ was refused —
+refusing the value rather than substituting the escrow σ` lines and disclosed
+`hf_scan_blind_positions = 1/8`, `hf_scan_blind_venue_term = 1` — the whole
+position was excluded from the HF scan while the coin's σ series was too short
+to fit. The model's own rule (`required_input("venue_position.sigma_annual")`,
+"inheriting the escrow's σ is thin-air default, not a measurement") and the
+operator's refusal agree; the value cleared the moment the book went flat.
+
+Why this is a **detection delay, not a loss channel**: the lender's
+enforceable coverage is the borrower's escrow (R5 nets the venue note against
+the lender's cap), so the venue principal is the borrower's own money at work.
+A borrower who wipes it — even blind — loses an escrow worth ~1.8× the
+principal to the lender's seizure, and the deficit, once real, is a fact the
+fold can serve without σ (`venue_equity < note`), at which point the escrow
+covers the claim. The fail-closed refusal is therefore the safer choice
+against *false* enforcement on unmeasurable risk; the named remedy, if the
+economics ever change, is a σ-free observed-equity floor for venue legs whose
+σ is unavailable, not an invented σ. What the surface must guarantee — and
+does — is that the blindness is never silent: it is a metric, a warning, and
+a named reason.
+
 ### The liquidation boundary is the spot-inclusive unified equity, and a scenario mark is not a market state (2026-11-23)
 
 Two boundaries that only a live account exposes:
