@@ -205,6 +205,31 @@ for both**; `openOrders[631]` = `sz 2.0 / origSz 5.49`, `orderStatus(631)` =
 remainder. Regression test:
 `a_partial_take_and_its_remainder_are_one_order_one_oid`.
 
+### The trigger vocabulary — `orderType` and `triggerCondition` (2026-11-23)
+
+A TP/SL lifecycle drill (open a long, arm a reduce-only trigger, rally the mark
+past it) fired correctly — the trigger leaves the book, the IOC closes the
+position, the fill carries `Close Long` and the trigger's `cloid`. But the
+`frontendOpenOrders`/`orderUpdates` metadata a UI or strategy reads to classify a
+trigger was **not the venue's**:
+
+* `orderType` was a generic `"Trigger"` for every trigger. The real venue names
+  take-profit/stop and market/limit — measured read-only on live
+  `frontendOpenOrders`: `Take Profit Market`, `Stop Market` (and their `Limit`
+  forms). Fixed to `Take Profit Market` / `Take Profit Limit` / `Stop Market` /
+  `Stop Limit`.
+* `triggerCondition` was a non-venue `"Take Profit Market Market(<px>)"` string.
+  The real venue prints the **firing direction** — `"Price above 10.155"` /
+  `"Price below 60780"` (whole price without a forced `.0`) — which is exactly
+  `fire_triggers`' rule per side and tpsl. Fixed.
+
+Both fixes are in one place (`order_type`, `trigger_condition` in `info.rs`), so
+`frontendOpenOrders`, `orderStatus` and the `orderUpdates` push all carry the
+correct vocabulary. Live after the roll (`relay-db79180`): a sell take-profit
+reads `orderType "Take Profit Market"`, `triggerCondition "Price above 29.885"`;
+a sell stop-limit reads `"Stop Limit"`, `"Price below 28.144"`. Regression test
+`a_trigger_reports_the_venue_order_type_and_condition`.
+
 ### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
 
 Measured during the drill, then closed on purpose as a **bounded** finding: with
