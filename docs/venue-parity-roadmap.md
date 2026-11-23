@@ -63,6 +63,39 @@ bit-for-bit (`venue_equity 971.4933`, numerator `1454.9908`, HF `1.497685`):
 two positions, a funding boundary and two taker closes moved the venue's own
 books and left the enforceable fold untouched — the R5 separation end to end.
 
+### The public trade tape — the real venue's `trades` channel, measured and fixed (2026-11-23)
+
+The one market-data channel the mirror did not serve: the real venue's WS
+`trades` subscription. A strategy written for the real venue that subscribes
+`{"type":"trades","coin":C}` got a parse error here ("Error parsing JSON into
+valid websocket request"). Closed end to end (`753de16`, then `124574b`,
+venue `relay-9be41d2`):
+
+* **Upstream**: `Stream::Trades(coin)` joins the relay's wanted set (the same
+  lease that asks for a book), so the upstream socket carries only the tapes
+  someone reads; `feed/ws.rs` folds the venue's `{"channel":"trades","data":
+  [...]}` into a bounded per-coin tape (256 entries, the sim's cache).
+* **Downstream**: `Subscription::Trades { coin }` acks as
+  `{"type":"trades","coin":"BTC"}` (verbatim, measured on the real venue) and
+  pushes `{"channel":"trades","data":[...]}` with the venue's entry shape
+  (`coin, side, px, sz, time, hash, tid, users:[buyer, seller]`) — and **no
+  tape history on subscribe**, because the real venue sends none (measured: the
+  ack, then only new trades).
+* **The venue's `tid` is not an ordering key** — the first build proved it the
+  hard way: a tid cursor replayed **678 entries for 271 trades** live
+  (measured tids 455934785646454 then 15595665306250 on consecutive real
+  pushes). The cursor is now the sim's own ingestion counter (`seq`, never on
+  the wire); live after the fix: first push 1.0 s after subscribe, 58 trades /
+  **58 unique tids**, no repeat. A regression test feeds a later arrival with
+  a smaller tid and asserts it is pushed exactly once.
+* **The tape is the market's, not the simulator's.** The mirror's simulated
+  orders fill against the mirrored book; their counterparty is a real book
+  participant the sim cannot address, so putting them on the public tape would
+  invent a second user. A strategy's own executions are its account channels
+  (`userFills`/`userEvents`), exactly as on the real venue; the tape stays the
+  real flow. Repeated `hash` within one frame is one transaction matching
+  several makers — real venue behaviour, not a defect.
+
 ### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
 
 Measured during the drill, then closed on purpose as a **bounded** finding: with
