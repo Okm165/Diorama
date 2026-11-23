@@ -351,8 +351,9 @@ enum Mem {
     Candle(CandleSub),
     /// The newest fill id (`tid`) already pushed.
     Fills(Option<u64>),
-    /// The newest **market** trade id (`tid`) already pushed on the tape.
-    Trades(Option<u64>),
+    /// The tape's ingestion cursor already pushed ([`crate::feed::MarketTrade`]
+    /// `seq`; the venue's `tid` is not an ordering key).
+    Trades(u64),
     /// The newest funding `(time, coin)` already pushed.
     Fundings(Option<(u64, String)>),
     /// The last best bid/ask pushed.
@@ -721,7 +722,10 @@ fn admit(sub: &Subscription, state: &ApiState) -> Result<Mem, Refusal> {
         // until the next real trade.
         Subscription::Trades { coin } => {
             has_book(coin)?;
-            Ok(Mem::Trades(None))
+            // The venue pushes no tape history: the subscriber's cursor is
+            // the current head, so the first frame carries only trades that
+            // arrive after the subscribe.
+            Ok(Mem::Trades(feed.trade_seq_head()))
         }
         Subscription::OrderUpdates { user } => {
             account_ok(user)?;
@@ -814,12 +818,12 @@ pub(super) fn pushes(live: &mut Live, state: &ApiState, now_ms: u64) -> Vec<Stri
             user_fundings_push(state, *user, cursor)
         }
         (Subscription::Bbo { coin }, Mem::Bbo(last)) => bbo_push(state, coin, last, now_ms),
-        (Subscription::Trades { coin }, Mem::Trades(last)) => {
-            let fresh = state.feed.market_trades_since(coin, *last);
-            let Some(newest) = fresh.last().map(|trade| trade.tid) else {
+        (Subscription::Trades { coin }, Mem::Trades(cursor)) => {
+            let fresh = state.feed.market_trades_since(coin, *cursor);
+            let Some(newest) = fresh.last().map(|trade| trade.seq) else {
                 return Vec::new();
             };
-            *last = Some(newest);
+            *cursor = newest;
             encode(&WsPush::Trades { data: fresh })
         }
         (Subscription::OrderUpdates { user }, Mem::Orders(seen)) => {
@@ -1593,7 +1597,11 @@ mod tests {
             hash: format!("0x{tid:064x}"),
             tid,
             users: vec!["0xaa".into(), "0xbb".into()],
+            seq: 0,
         };
+        // A trade that predates the subscribe is *not* replayed (the venue
+        // pushes no tape history).
+        feed.put_market_trades(vec![trade(6, "101.0", "B")]);
         feed.put_market_trades(vec![trade(7, "101.5", "B"), trade(8, "101.4", "A")]);
         let frames = frames_of(&mut subs[0], &state);
         assert_eq!(frames.len(), 1, "one frame carries the batch");
@@ -1618,6 +1626,19 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0]["data"].as_array().unwrap().len(), 1);
         assert_eq!(frames[0]["data"][0]["tid"], 9);
+        // **The venue's `tid` is not an ordering key** (measured live:
+        // 455934785646454 then 15595665306250). A later arrival with a smaller
+        // tid is still new and must be pushed — and only once.
+        feed.put_market_trades(vec![trade(5, "101.7", "A")]);
+        let frames = frames_of(&mut subs[0], &state);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["data"][0]["tid"], 5);
+        assert!(
+            frames_of(&mut subs[0], &state).is_empty(),
+            "the cursor is the arrival order, so nothing repeats"
+        );
+        // And the wire keeps the venue's shape: no sim-local cursor field.
+        assert!(frames[0]["data"][0].get("seq").is_none());
     }
 
     /// The subscription lifecycle: ack, at-most-once, unsubscribe, and the

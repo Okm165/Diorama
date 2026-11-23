@@ -129,6 +129,12 @@ pub(crate) struct MarketTrade {
     pub tid: u64,
     /// The buyer and the seller, in the venue's order.
     pub users: Vec<String>,
+    /// The sim's own **ingestion order** (never on the wire). The venue's
+    /// `tid` is *not* an ordering key — measured live 2026-11-23: consecutive
+    /// pushes carry tids 455934785646454 then 15595665306250 — so a
+    /// subscriber's cursor is this counter, not the trade id.
+    #[serde(default, skip)]
+    pub seq: u64,
 }
 
 /// The live cache (never persisted: it is a cache, and a stale file would
@@ -161,6 +167,10 @@ struct Cache {
     /// `trades` stream. A cache, never persisted: a reconnect is served only
     /// new trades, exactly as the venue serves them.
     trades: BTreeMap<String, VecDeque<MarketTrade>>,
+    /// The tape's ingestion counter: every appended trade takes the next
+    /// value, so a downstream cursor is an arrival position and never an
+    /// assumption about the venue's (non-monotonic) `tid`.
+    next_trade_seq: u64,
     ctxs: BTreeMap<String, AssetCtx>,
     ctx_at: BTreeMap<String, u64>,
     /// Each coin's published funding-rate **step history** — `(at_ms, rate)`
@@ -846,7 +856,9 @@ impl MarketFeed {
             return;
         }
         let mut c = self.write();
-        for trade in trades {
+        for mut trade in trades {
+            trade.seq = c.next_trade_seq;
+            c.next_trade_seq = c.next_trade_seq.saturating_add(1);
             let coin = trade.coin.clone();
             let tape = c.trades.entry(coin).or_default();
             tape.push_back(trade);
@@ -858,15 +870,23 @@ impl MarketFeed {
         self.notify();
     }
 
-    /// The coin's tape entries with `tid` greater than `after` (arrival order,
-    /// oldest first). `None` is a subscriber's first read: its whole window.
-    pub(crate) fn market_trades_since(&self, coin: &str, after: Option<u64>) -> Vec<MarketTrade> {
+    /// The tape's current ingestion head: a new subscriber's cursor, so its
+    /// first push carries only what happened after the subscribe (the venue
+    /// pushes no tape history, measured live 2026-11-23).
+    pub(crate) fn trade_seq_head(&self) -> u64 {
+        self.read().next_trade_seq
+    }
+
+    /// The coin's tape entries ingested after the cursor (arrival order,
+    /// oldest first). The cursor is [`MarketTrade::seq`] — the venue's `tid`
+    /// is not monotonic and cannot order a tape.
+    pub(crate) fn market_trades_since(&self, coin: &str, after: u64) -> Vec<MarketTrade> {
         let c = self.read();
         let Some(tape) = c.trades.get(coin) else {
             return Vec::new();
         };
         tape.iter()
-            .filter(|trade| after.is_none_or(|last| trade.tid > last))
+            .filter(|trade| trade.seq > after)
             .cloned()
             .collect()
     }
