@@ -560,11 +560,18 @@ pub(crate) fn settle_spot_fill(
 /// Reserve `amount` of the token's spot balance for a resting order: the
 /// free balance (total − hold) must cover it; the venue's spot `hold` is a
 /// reservation on the total, not a second balance.
-pub(crate) fn spot_reserve(account: &mut Account, token: u32, amount: Decimal) -> Result<()> {
+pub(crate) fn spot_reserve(
+    account: &mut Account,
+    token: crate::sim::TokenRef<'_>,
+    amount: Decimal,
+) -> Result<()> {
     if amount <= Decimal::ZERO {
         return Ok(());
     }
-    let entry = spot_entry(account, crate::sim::TokenRef { index: token, coin: "" });
+    // The ref carries the token's served name: this call creates the entry
+    // when the account never held the token, and an empty name would serve
+    // `coin: ""` on spotClearinghouseState (measured 2026-11-23).
+    let entry = spot_entry(account, token);
     let free = sub(entry.total, entry.hold, "spot free")?;
     if free < amount {
         return Err(crate::error::Error::bad_request(
@@ -592,33 +599,39 @@ pub(crate) fn settle_spot_maker(
     notional: Decimal,
     quantity: Decimal,
     fee: Decimal,
-    base_token: u32,
-    quote_token: u32,
+    base: crate::sim::TokenRef<'_>,
+    quote: crate::sim::TokenRef<'_>,
 ) -> Result<FillEffect> {
-    macro_rules! entry_of {
-        ($account:expr, $token:expr) => {
-            spot_entry($account, crate::sim::TokenRef { index: $token, coin: "" })
-        };
-    }
+    // The refs carry the tokens' served names: a side's credit creates the
+    // entry when the account never held the token, and an empty name would
+    // serve `coin: ""` on spotClearinghouseState (measured 2026-11-23). The
+    // hold's token is one of the pair (a buy reserved quote, a sell base).
+    let hold_ref = |hold: &crate::sim::order::SpotHold| {
+        if hold.token == quote.index {
+            quote
+        } else {
+            base
+        }
+    };
     match side {
         crate::sim::order::Side::Buy => {
             if let Some(h) = hold {
-                let entry = entry_of!(account, h.token);
+                let entry = spot_entry(account, hold_ref(&h));
                 entry.hold = sub(entry.hold, notional.min(entry.hold), "spot hold release")?;
             }
-            let quote_entry = entry_of!(account, quote_token);
+            let quote_entry = spot_entry(account, quote);
             quote_entry.total = sub(quote_entry.total, notional, "spot maker quote debit")?;
             let received = sub(quantity, div(fee, px, "spot maker fee in base")?, "spot maker fee")?;
-            let base_entry = entry_of!(account, base_token);
+            let base_entry = spot_entry(account, base);
             base_entry.total = add(base_entry.total, received, "spot maker base credit")?;
             base_entry.entry_ntl = add(base_entry.entry_ntl, notional, "spot maker cost basis")?;
         }
         crate::sim::order::Side::Sell => {
             if let Some(h) = hold {
-                let entry = entry_of!(account, h.token);
+                let entry = spot_entry(account, hold_ref(&h));
                 entry.hold = sub(entry.hold, quantity.min(entry.hold), "spot hold release")?;
             }
-            let base_entry = entry_of!(account, base_token);
+            let base_entry = spot_entry(account, base);
             let old = base_entry.total;
             let new = sub(old, quantity, "spot maker base debit")?;
             base_entry.entry_ntl = if old > Decimal::ZERO {
@@ -628,7 +641,7 @@ pub(crate) fn settle_spot_maker(
             };
             base_entry.total = new;
             let proceeds = sub(notional, fee, "spot maker proceeds")?;
-            let quote_entry = entry_of!(account, quote_token);
+            let quote_entry = spot_entry(account, quote);
             quote_entry.total = add(quote_entry.total, proceeds, "spot maker quote credit")?;
         }
     }

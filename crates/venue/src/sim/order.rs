@@ -910,7 +910,7 @@ impl Sim {
                 ));
             }
             let oid = self
-                .rest_spot_remainder(placer, req, req.size, (base.index, quote.index), None)?
+                .rest_spot_remainder(placer, req, req.size, (&base, &quote), None)?
                 .ok_or_else(|| Error::bad_request("Post only order could not rest."))?;
             return Ok(Placed {
                 fill: None,
@@ -1052,7 +1052,7 @@ impl Sim {
             filled_ntl: notional,
         });
         let resting =
-            self.rest_spot_remainder(placer, req, remainder, (base.index, quote.index), carry)?;
+            self.rest_spot_remainder(placer, req, remainder, (&base, &quote), carry)?;
         Ok(Placed { fill, resting })
     }
 
@@ -1126,8 +1126,8 @@ impl Sim {
                     notional,
                     *sz,
                     fee,
-                    base.index,
-                    quote.index,
+                    crate::sim::TokenRef { index: base.index, coin: &base.name },
+                    crate::sim::TokenRef { index: quote.index, coin: &quote.name },
                 )
             })?;
             let facts = super::account::FillFacts {
@@ -1165,14 +1165,15 @@ impl Sim {
     }
 
     /// Reserve the remainder's balance and rest it (a Gtc or post-only spot
-    /// order).
+    /// order). The tokens carry their served names: the reserve creates the
+    /// entry when the account never held the token.
     #[allow(clippy::too_many_arguments)] // one hold-and-rest call: the pair's tokens and the carried take are distinct inputs
     fn rest_spot_remainder(
         &self,
         placer: Placer,
         req: &Order,
         remainder: Decimal,
-        tokens: (u32, u32),
+        tokens: (&crate::wire::SpotToken, &crate::wire::SpotToken),
         carry: Option<RestCarry>,
     ) -> Result<Option<u64>> {
         if !matches!(req.tif, Tif::Gtc | Tif::Alo) || remainder <= Decimal::ZERO {
@@ -1186,8 +1187,8 @@ impl Sim {
             Side::Sell => remainder,
         };
         let token = match req.side() {
-            Side::Buy => tokens.1,
-            Side::Sell => tokens.0,
+            Side::Buy => crate::sim::TokenRef { index: tokens.1.index, coin: &tokens.1.name },
+            Side::Sell => crate::sim::TokenRef { index: tokens.0.index, coin: &tokens.0.name },
         };
         self.with_account(placer.address, |account| {
             super::account::spot_reserve(account, token, reserved)
@@ -1195,7 +1196,7 @@ impl Sim {
         let oid = self.rest_order_at(placer, req, (px, remainder), carry)?;
         self.with_state(|st| {
             if let Some(r) = st.resting.get_mut(&oid) {
-                r.spot_hold = Some(SpotHold { token, amount: reserved });
+                r.spot_hold = Some(SpotHold { token: token.index, amount: reserved });
             }
             Ok(())
         })?;
@@ -2799,6 +2800,55 @@ mod tests {
         let fill = account.fills.back().unwrap();
         assert_eq!(fill.dir, "Sell");
         assert_eq!(fill.fee_token, "USDC");
+        assert!(sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid));
+    }
+
+    /// A buy maker's base credit **creates** the balance entry: an account
+    /// that never held the base gets its served name (`coin: "PURR"`), not an
+    /// empty row — the maker path used to insert `{"coin": "", "token": 1}`
+    /// (measured live 2026-11-23). The economics are the venue's: the maker
+    /// buys 500 PURR at 0.0745, pays exactly the notional, and the 0.040 %
+    /// fee arrives net in the received token (0.2 PURR).
+    #[test]
+    fn a_spot_maker_credit_names_the_token_it_creates() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        let mut buy = spot_order(Side::Buy, "500", Some("0.0745"));
+        buy.tif = Tif::Alo;
+        let placed = sim.place(&feed, a, &buy).expect("inside the spread, it rests");
+        let oid = placed.resting.expect("rests");
+
+        // B crosses it as a taker sell (it buys base off the book first).
+        let b = Address::repeat_byte(0x5d);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: b,
+                class: DealClass::Spot,
+                coin: None,
+                dex: None,
+                amount: "1000".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        sim.place(&feed, b, &spot_order(Side::Buy, "1000", Some("0.08")))
+            .expect("the ask has size");
+        let placed = sim
+            .place(&feed, b, &spot_order(Side::Sell, "500", Some("0.0745")))
+            .expect("crosses the resting bid");
+        assert_eq!(placed.fill.expect("filled").total_sz, Decimal::from(500));
+
+        let account = sim.account(a).unwrap().expect("the account");
+        let purr = account.spot.get(&1).expect("the credit creates the base entry");
+        assert_eq!(purr.coin, "PURR", "the served name rides the credit");
+        assert_eq!(purr.hold, Decimal::ZERO);
+        // 500 − 37.25 × 0.0004 / 0.0745 = 499.8 PURR; USDC debited 37.25.
+        assert_eq!(purr.total, Decimal::from(500) - Decimal::new(2, 1));
+        let usdc = account.spot.get(&0).unwrap();
+        assert_eq!(usdc.total, Decimal::from(1000) - Decimal::new(3_725, 2));
+        let fill = account.fills.back().unwrap();
+        assert_eq!(fill.dir, "Buy");
+        assert_eq!(fill.fee_token, "PURR");
         assert!(sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid));
     }
 

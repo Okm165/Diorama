@@ -384,8 +384,8 @@ impl Sim {
                 notional,
                 take,
                 fee,
-                base.index,
-                quote.index,
+                crate::sim::TokenRef { index: base.index, coin: &base.name },
+                crate::sim::TokenRef { index: quote.index, coin: &quote.name },
             )
         })?;
         let facts = account::FillFacts {
