@@ -98,9 +98,17 @@ orders"* instead of resting (measured on `para:10Y`: an ALO one tick below the
 bid refused; `openOrders` empty). The door now places through `Sim::place`
 (the wire's own entry) — ALO refuses a crossing order with the venue's bbo
 string, GTC rests its remainder, and the fill-shaped response gains
-`resting: true` for a placement that rests. This was the control lane's own
-fidelity gap, found by probing the restored para dex rather than assuming the
-advertised surface was true.
+`resting: true` for a placement that rests. It also **cancels what it
+places**: `POST /control/cancel {address, coin, oid}` runs the venue's own
+cancel body — before it, a resting order placed through the door had no
+counterpart and had to be cleared from the wire path. Verified live on the
+restored para dex (`relay-06e7103`): ALO below the bid → `resting:true`,
+visible in `openOrders`; crossing ALO → *"Post only order would have
+immediately matched, bbo was 5.0047"*; cancel → `canceled:true`,
+`openOrders` empty; then a taker round trip of 3 `para:10Y` closed exactly —
+ΔAV −0.016201 = −0.0135 gross (the 4.5-tick spread) − 0.002701 fees. The
+control lane is now the full placement vocabulary it advertises, and the para
+dex has traded end to end.
 
 ### The enforceable numerator is immune to venue P&L — proven live, with the account book exact (2026-11-22)
 
