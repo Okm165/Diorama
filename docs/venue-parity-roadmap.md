@@ -3633,3 +3633,47 @@ basis all exact.
   real venue, per the `assemble` notes); the equity closes as
   wallet + isolated margin + unrealized to the digit. A drill assertion built
   on `raw + Σ unrealizedPnl` was the wrong identity — no code change.
+
+### Liquidation, funding and cross-margin multi-PnL: three lifecycles verified live (2026-11-23)
+
+- **Liquidation end to end.** A dealt account opened a 10x-isolated 9.72-QNT
+  long (liqPx 27.42 served), a controlled −30 % crash (mark 28.918 → 20.2426,
+  exactly −30.000 %) breached it, and the waterfall closed the whole position
+  **within one second** at 20.200846 through the book: `dir "Close Long"`,
+  `closedPnl −84.983`, and the fill carries the venue's **`liquidation` object**
+  (`liquidatedUser`, `markPx`). The account kept its residual equity (14.99).
+  The backstop path was not reached (the book had liquidity). The earlier
+  "waterfall: no executable action; backing off" WARN was a drill account left
+  with a zeroed ledger mid-experiment — the 30 s backoff is the designed
+  response to a refused close on a thin book, and a plain reduce-only IOC closed
+  what the waterfall could not (its close ran against a drained hold, not a
+  waterfall defect).
+- **Funding charged on a real mirror position.** A 10-QNT long held across the
+  05:00:00Z boundary was charged **−0.066588736 USDC**, and `userFunding`
+  serves the venue's row (`type funding`, `fundingRate 0.000231291`, `szi`,
+  `usdc`, `time` = the boundary exactly). The payment is
+  `szi × oracle_at_boundary × rate_in_force` (the rate published *before* the
+  boundary, oracle-priced) and the account value moved by it. This closes the
+  "funding is charged on a real mirror position" gap from the 19 Nov report.
+- **Cross-margin multi-PnL.** One account, BTC long + ETH short, both **cross**
+  on the default dex: the identity `accountValue = totalRawUsd +
+  Σ sign·positionValue` holds exactly (1225.4 − 518.25 = 707.16), and a
+  controlled −10 % ETH crash moved the AV by exactly the ETH leg's delta
+  (+51.825) with the BTC leg's unrealized untouched. Multi-position PnL on the
+  core markets is a live, exact surface.
+
+### The feed-rewind WARNs are boot reconciliation, not liveness (2026-11-23)
+
+"feed round regressed — treating the lower round as the canonical pointer"
+fired 45× in the audit window: **43 in one minute — the indexer pod's boot**
+(each asset once: the authoritative poller's canonical read supersedes the
+abandoned epoch's stream rows), then two late catch-ups. The pod itself did not
+see a chain rewind (anvil-v age 74 m); the arm only ever runs on the
+authoritative poller read, never the ordered event scanner, and the feed for
+the one asset named is healthy (16 s cadence, current). The `prices` table
+carries 4,883 superseded rows out of 22k for that asset — boot reconciliations
+across the many restarts a roll-heavy schedule produces. No liveness defect;
+the served spine is current and monotone between boots. The other audit WARNs
+closed the same way: the venue-account poll refusals all fall in the roll
+minute (recorded as gaps, by design), and the vault no-code WARN is the latched
+INV-2026-11-18-004.
