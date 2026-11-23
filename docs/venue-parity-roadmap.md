@@ -63,6 +63,41 @@ bit-for-bit (`venue_equity 971.4933`, numerator `1454.9908`, HF `1.497685`):
 two positions, a funding boundary and two taker closes moved the venue's own
 books and left the enforceable fold untouched — the R5 separation end to end.
 
+### The liquidation boundary is the spot-inclusive unified equity, and a scenario mark is not a market state (2026-11-23)
+
+Two boundaries that only a live account exposes:
+
+* **A unified account's spot collateral defends its perp.** With 74 `xyz:SNDK`
+  long at 7.5× and the whole perp market crashed 20 %, the served
+  `crossMarginSummary.accountValue` read **−113.69** against a maintenance of
+  **258.06** — and the venue correctly did **not** liquidate: the account's
+  unified equity (spot 971.493278 + perp −113.69 = 857.80) was above
+  maintenance. `waterfall::check_cross_leg` uses `unified_equity` for exactly
+  the stated reason ("the order lane trades against it; the waterfall must not
+  liquidate the position it just allowed"); the same crash on the spot-less
+  disposable account legitimately liquidated in 1.4 s. The served
+  `crossMarginSummary` excludes spot **by design** (the real venue's shape);
+  a reader must not treat it as the liquidation gate. The deeper crash (whole
+  599.74 < note 971.49) left the book solvent (599.74 > 245.16) and open — the
+  uncovered-note branch is reachable without a liquidation.
+* **A control-owned mark is refused, not folded.** While a `/control/crash`
+  owned the coin, the operator refused the venue term (`refusal:
+  "ControlOwned"`, `the venue account's marks are scenario-owned (control
+  plane) — a simulation input, not a market state`) and disclosed the gap:
+  `hf_scan_blind_positions = 1/8`, `hf_scan_blind_venue_term = 1` on its own
+  health, with `venue HF term refused … will be refused rather than decided on
+  a numerator missing the venue leg`. A fault injection cannot fake a market
+  liquidation; it reads as blind coverage until the hand-back (the row resumed
+  at 03:06:12 at baseline 971.4933 / 1454.9908 / 1.497685). The hand-back also
+  releases the book with the price, so one quote attempt immediately after
+  answers "the market plane is warming up (no venue data yet)" rather than a
+  stale book — honest warm-up, self-healed in seconds.
+* **Real book depth is thin enough to matter**: closing 74 `xyz:SNDK` walked
+  only 20.064 at the first bid and needed four more IOC passes (6.334, 1.213,
+  2.800, 43.589) to flatten — the mirror offers the real book, not an infinite
+  one, and a strategy that assumes a single-hit exit would have been left
+  short.
+
 ### Two serving-cache leaks and a liquidation, measured live (2026-11-23)
 
 **A correlation a few ulps outside `[-1, 1]` refused the whole portfolio
