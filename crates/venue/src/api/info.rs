@@ -31,16 +31,26 @@ use std::sync::Arc;
 /// The readiness gate's freshness window (the plan's ≤6 s client gate, with
 /// margin for a poll interval).
 /// The wire's order-type names (the venue's own vocabulary): one spelling.
+/// A resting order is `Limit`; a trigger names its take-profit/stop and its
+/// market/limit execution, exactly as the real venue's `orderType` does
+/// (measured on `frontendOpenOrders`: `Take Profit Market`, `Stop Market`,
+/// `Take Profit Limit`, `Stop Limit`).
 const LIMIT: &str = "Limit";
-const MARKET: &str = "Market";
-const TRIGGER: &str = "Trigger";
+const TP_MARKET: &str = "Take Profit Market";
+const TP_LIMIT: &str = "Take Profit Limit";
+const STOP_MARKET: &str = "Stop Market";
+const STOP_LIMIT: &str = "Stop Limit";
 
-/// The wire's order-type name: a trigger rests as `Trigger`.
+/// The wire's `orderType`: `Limit` for a resting order, else the trigger's own
+/// take-profit/stop-and-market/limit name (the venue's vocabulary).
 fn order_type(r: &crate::sim::order::RestingOrder) -> &'static str {
-    if r.trigger.is_some() {
-        TRIGGER
-    } else {
-        LIMIT
+    use crate::sim::order::Tpsl;
+    let Some(t) = r.trigger else { return LIMIT };
+    match (t.tpsl, t.is_market) {
+        (Tpsl::Tp, true) => TP_MARKET,
+        (Tpsl::Tp, false) => TP_LIMIT,
+        (Tpsl::Sl, true) => STOP_MARKET,
+        (Tpsl::Sl, false) => STOP_LIMIT,
     }
 }
 
@@ -649,22 +659,22 @@ pub(crate) fn side_letter(side: crate::sim::order::Side) -> &'static str {
 }
 
 fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
+    use crate::sim::order::{Side, Tpsl};
     match &order.trigger {
         None => "N/A".into(),
         Some(t) => {
-            let kind = match t.tpsl {
-                crate::sim::order::Tpsl::Tp => "Take Profit",
-                crate::sim::order::Tpsl::Sl => "Stop",
-            };
-            let dir = match order.side {
-                crate::sim::order::Side::Buy => MARKET,
-                crate::sim::order::Side::Sell => LIMIT,
-            };
-            format!(
-                "{kind} {dir} {}({})",
-                if t.is_market { MARKET } else { LIMIT },
-                t.trigger_px
-            )
+            // The venue prints the **firing direction**: "Price above X" when
+            // the trigger fires on a rise, "Price below X" on a fall. That is
+            // exactly `fire_triggers`' rule, per side and tpsl.
+            let above = matches!(
+                (order.side, t.tpsl),
+                (Side::Sell, Tpsl::Tp) | (Side::Buy, Tpsl::Sl)
+            );
+            let arrow = if above { "above" } else { "below" };
+            // The venue prints the trigger price without a forced `.0` (a whole
+            // price is `60780`, not `60780.0`; a fractional one keeps its
+            // decimals), unlike `triggerPx` which keeps the point.
+            format!("Price {arrow} {}", t.trigger_px.normalize())
         }
     }
 }
@@ -1479,6 +1489,57 @@ pub(crate) fn abstraction_of(account: &account::Account) -> UserAbstraction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The venue's trigger vocabulary, measured on the real `frontendOpenOrders`
+    /// (2026-11-23): `orderType` names take-profit/stop and market/limit, and
+    /// `triggerCondition` is the **firing direction** ("Price above/below X",
+    /// the whole price printed without a forced `.0`). The mirror used to send a
+    /// generic `Trigger` and a non-venue condition string.
+    #[test]
+    fn a_trigger_reports_the_venue_order_type_and_condition() {
+        use crate::sim::order::{Reduce, RestingOrder, Side, Tif, Tpsl, Trigger};
+        use alloy_primitives::Address;
+        use rust_decimal::Decimal;
+        let row = |side: Side, tpsl: Tpsl, is_market: bool, px: &str, trig: bool| RestingOrder {
+            oid: 1,
+            account: Address::ZERO,
+            coin: "BTC".into(),
+            side,
+            px: Decimal::from(100),
+            sz: Decimal::from(1),
+            orig_sz: Decimal::from(1),
+            reduce: Reduce::Only,
+            tif: Tif::Gtc,
+            cloid: None,
+            trigger: trig.then(|| Trigger {
+                is_market,
+                trigger_px: px.parse().unwrap(),
+                tpsl,
+            }),
+            placed_ms: 0,
+            filled_sz: Decimal::ZERO,
+            filled_ntl: Decimal::ZERO,
+            builder: None,
+            spot_hold: None,
+        };
+        // A plain resting order.
+        let plain = row(Side::Buy, Tpsl::Tp, true, "1", false);
+        assert_eq!(order_type(&plain), "Limit");
+        assert_eq!(trigger_condition(&plain), "N/A");
+        // A sell take-profit fires on a rise: "Price above".
+        let sell_tp = row(Side::Sell, Tpsl::Tp, true, "60780.0", true);
+        assert_eq!(order_type(&sell_tp), "Take Profit Market");
+        assert_eq!(trigger_condition(&sell_tp), "Price above 60780");
+        // A sell stop (limit) fires on a fall: "Price below", keeps decimals.
+        let sell_sl = row(Side::Sell, Tpsl::Sl, false, "10.155", true);
+        assert_eq!(order_type(&sell_sl), "Stop Limit");
+        assert_eq!(trigger_condition(&sell_sl), "Price below 10.155");
+        // A buy stop fires on a rise; a buy take-profit on a fall.
+        assert_eq!(order_type(&row(Side::Buy, Tpsl::Sl, true, "5", true)), "Stop Market");
+        assert_eq!(order_type(&row(Side::Buy, Tpsl::Tp, false, "5", true)), "Take Profit Limit");
+        assert_eq!(trigger_condition(&row(Side::Buy, Tpsl::Sl, true, "5", true)), "Price above 5");
+        assert_eq!(trigger_condition(&row(Side::Buy, Tpsl::Tp, false, "5", true)), "Price below 5");
+    }
 
     fn state_with(feed: crate::feed::MarketFeed) -> Arc<ApiState> {
         let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
