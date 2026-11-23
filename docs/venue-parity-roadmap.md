@@ -96,6 +96,40 @@ venue `relay-9be41d2`):
   real flow. Repeated `hash` within one frame is one transaction matching
   several makers — real venue behaviour, not a defect.
 
+### The order lane's two remaining feedback gaps, measured and fixed (2026-11-23)
+
+Probing the channels a strategy actually reacts to (not the fill itself) found
+two defects, both on the real `/exchange` surface:
+
+* **A marketable GTC was refused *after* it traded a slice.** A GTC larger than
+  the account's margin but crossing real depth took its fill and *then* failed
+  the resting remainder's margin check, so the client received
+  `"Insufficient margin to place order."` for an order it had been filled on
+  (measured: a 120-lot SNDK GTC took 11.988 and errored; AV moved, a position
+  opened). Root cause: only the remainder was checked, after the take. The
+  whole order's margin is now reserved up front at its own price
+  (`require_marketable_gtc_margin`), so a GTC the account cannot carry is
+  refused with no fill and no position. Live after the fix: an oversized GTC
+  answers `Insufficient margin`, AV stays $10, positions stay empty.
+* **An order that never rests was invisible to `orderStatus` and
+  `orderUpdates`.** A full IOC take (or a GTC that filled whole) left no
+  terminal row, so `orderStatus` could not answer and `orderUpdates` never
+  pushed `filled` while the `userFills` channel fired — a strategy following
+  the order lifecycle saw a fill with no order. Now every order that never
+  rests is terminalized at the seam (`record_terminal`): `Filled` when the take
+  covered it, `Canceled` for an IOC's unfilled remainder (or a remainder the
+  account can no longer carry after the take — the take is a fact, never
+  reported as a failed order). Live after the fix: a full IOC fill pushes
+  `{"status":"filled"}` on `orderUpdates` and `orderStatus` answers its row;
+  a partial IOC records `filled_sz` taken and the remainder as `canceled`.
+
+Both are covered by regression tests (`a_marketable_gtc_is_refused_whole_before_it_trades`,
+`an_order_that_never_rests_is_terminal_and_visible`); the venue's lint gate is
+green (0 warnings, 405 tests) and it runs as `relay-4b67461`. Fees were also
+re-verified against real fills this pass: spot 7/4 bp, perp 4.5/1.5 bp, and
+HIP-3 `0.2 × the user's tier` (exact on clean samples) — the mirror's base-tier
+schedule is faithful.
+
 ### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
 
 Measured during the drill, then closed on purpose as a **bounded** finding: with
