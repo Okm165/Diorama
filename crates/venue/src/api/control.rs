@@ -203,6 +203,11 @@ pub(crate) struct OrderResponse {
     pub address: Address,
     #[serde(flatten)]
     pub fill: crate::sim::order::Fill,
+    /// Whether a remainder (or the whole order) rests in `openOrders`. Absent
+    /// on a pure take, present and `true` for an ALO/GTC placement — the
+    /// placement's own status, as the venue serves `filled`/`resting`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resting: bool,
 }
 
 pub(crate) async fn order(
@@ -211,7 +216,25 @@ pub(crate) async fn order(
 ) -> Result<Json<OrderResponse>> {
     let address = req.address;
     let order: crate::sim::order::Order = req.into();
-    let fill = state.sim.order(&state.feed, address, &order)?;
+    // **The door's contract is the placement, not only the take.** The tif is
+    // advertised here (`ioc|gtc|alo`), but routing every request through the
+    // taker path made a non-crossing `alo`/`gtc` refuse "could not immediately
+    // match" instead of resting — the wire's own entry (`place`) is what
+    // honors the tif (ALO refuses a crossing order with the venue's bbo
+    // string; GTC rests its remainder). Measured 2026-11-23: an ALO one tick
+    // below the bid refused, and openOrders stayed empty.
+    let placed = state.sim.place(&state.feed, address, &order)?;
+    let resting = placed.resting.is_some();
+    // A resting-only outcome keeps the fill-shaped response (zero size, empty
+    // levels, the resting oid) so one consumer shape serves both statuses; a
+    // partial fill reports its own size and oid and `resting` names the
+    // remainder in `openOrders`, as the venue's `filled`/`resting` do.
+    let fill = placed.fill.unwrap_or(crate::sim::order::Fill {
+        total_sz: Decimal::ZERO,
+        avg_px: Decimal::ZERO,
+        consumed: Vec::new(),
+        oid: placed.resting.unwrap_or_default(),
+    });
     // The fill's provenance, so every fill is self-explaining: the levels it
     // walked (the consumed sizes — the COW analogue) and the served book's
     // own source — `live@<age>` proves the depth was the live venue's,
@@ -246,9 +269,10 @@ pub(crate) async fn order(
         consumed = fill.consumed.len(),
         levels = %levels.join(" "),
         book = %book,
-        "sim order filled"
+        resting,
+        "sim order placed"
     );
-    Ok(Json(OrderResponse { address, fill }))
+    Ok(Json(OrderResponse { address, fill, resting }))
 }
 
 // ---- advance -------------------------------------------------------------
