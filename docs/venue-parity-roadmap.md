@@ -3677,3 +3677,50 @@ the served spine is current and monotone between boots. The other audit WARNs
 closed the same way: the venue-account poll refusals all fall in the roll
 minute (recorded as gaps, by design), and the vault no-code WARN is the latched
 INV-2026-11-18-004.
+
+### A fired trigger's own oid served `canceled` — it is the venue's `triggered` (2026-11-23)
+
+The lifecycle statuses the sim records were `filled`/`canceled`/`marginCanceled`, and a
+trigger that fired terminalized its own oid as **`canceled`** — which a client reads
+as the user's cancel. The real venue's order-status list names the firing
+explicitly (`triggered: Trigger order triggered`). Fix (`320026d`, release
+`relay-320026d`): a fired trigger ends its own oid with `triggered`; the fill stays
+with the resulting market order carrying the trigger's cloid, unchanged. Verified
+live: `orderStatus(oid)` `open` → **`triggered`** after a controlled mark cross,
+with the `Close Long` fill under the cloid. Regression test
+`a_fired_trigger_reports_the_triggered_status`.
+
+**The boundary that remains** (named, not guessed): the docs' *rejection* statuses
+(`minTradeNtlRejected`, `tickRejected`, `badAloPxRejected`, `iocCancelRejected`,
+`reduceOnlyRejected`, `perpMarginRejected`, `badTriggerPxRejected`,
+`insufficientSpotBalanceRejected`, `oracleRejected`, `perpMaxPositionRejected`, …)
+are not recorded as terminal rows a client can read back by cloid; the sim serves
+the venue's **placement** error string instead. Whether the real venue records a
+rejected placement under its cloid is not measurable read-only (no order may be
+placed on the real venue), so this stays an open parity item rather than an
+assumption-driven change. The lifecycle set the sim can reach is complete:
+`open`, `filled`, `canceled`, `marginCanceled`, `triggered`.
+
+### Health surface ↔ venue state: audited exact, one named boundary (2026-11-23)
+
+Every one of the 8 served health rows was recomputed from its own inputs and from
+the venue's live `/info`:
+
+- `num = collateral_value_usd × liquidation_threshold − pending_coupon`
+  (1455.00 × 0.83 − 0.0075 = 1454.99 on the live loan; the 0.80-threshold WETH
+  row likewise), `den = debt_usd`, `hf = num/den` — all exact.
+- **The venue term is the venue's own number**: the live loan's
+  `venue_equity_usd` 971.493277636 equals its spot USDC 971.493278 to the last
+  digit; the shared-dex account `efe3ef00` reads 60.860086 = USDC + default-dex
+  AV + xyz AV **+ para AV** closing exactly, so the **negative para ledger
+  (−4.1737) is honestly counted** — no per-dex omission or double count.
+- **Boundary**: the venue term's spot side is the loan's **collateral token**
+  (USDC) only; non-USDC spot balances are not valued (measured: 0.00986 spot
+  HYPE ≈ $0.28 ignored on that account). That understates equity — conservative
+  for draws and liquidation, and the real unified account does count all spot —
+  so it is recorded as a product boundary (which spot tokens are venue
+  collateral), not changed unilaterally.
+
+The pass's waterfall WARNs were the drills themselves: the controlled −30 % crash
+liquidated two leftover test accounts at the crashed mark (a global, honest
+waterfall), and the backoffs were the designed retry on their drained state.
