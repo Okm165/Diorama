@@ -275,6 +275,43 @@ pub(crate) async fn order(
     Ok(Json(OrderResponse { address, fill, resting }))
 }
 
+// ---- cancel --------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CancelRequest {
+    pub address: Address,
+    pub coin: String,
+    pub oid: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CancelResponse {
+    pub address: Address,
+    pub oid: u64,
+    pub canceled: bool,
+}
+
+/// One resting order, canceled by oid — the counterpart of a placement that
+/// rests. The door could place (and, since the tif fix, genuinely rest) an
+/// order but had no way to remove it: a drill's ALO was cleared from the wire
+/// path instead (measured 2026-11-23). The venue's own cancel semantics are
+/// the body (`Sim::cancel`, normal speed), so the two doors cannot disagree
+/// about what a cancel is.
+pub(crate) async fn cancel(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<CancelRequest>,
+) -> Result<Json<CancelResponse>> {
+    state
+        .sim
+        .cancel(req.address, &req.coin, req.oid, crate::sim::order::CancelSpeed::of(false))?;
+    Ok(Json(CancelResponse {
+        address: req.address,
+        oid: req.oid,
+        canceled: true,
+    }))
+}
+
 // ---- advance -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

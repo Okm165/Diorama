@@ -256,6 +256,7 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
         .route(diorama_devnet::handlers::METRICS, get(control::metrics))
         .route("/control/deal", post(control::deal))
         .route("/control/order", post(control::order))
+        .route("/control/cancel", post(control::cancel))
         .route("/control/advance", post(control::advance))
         .route(
             "/control/clock",
